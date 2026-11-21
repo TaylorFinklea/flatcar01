@@ -1,0 +1,211 @@
+#!/bin/sh
+# Gate-C dashboard provisioner. Invoke only as: bws-project run -- $0 [--verify] https://...
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
+dash_dir=$repo_dir/config/observability/dashboards
+tmp_dir=
+
+usage() { echo "usage: bws-project run -- $0 [--verify] <https-base-url>" >&2; exit 2; }
+fail() { echo "$1" >&2; exit 1; }
+cleanup() { [ -z "$tmp_dir" ] || rm -rf "$tmp_dir"; }
+trap cleanup EXIT HUP INT TERM
+
+require_bws_runtime() {
+	# bws-project deliberately removes BWS_ACCESS_TOKEN before it launches its
+	# child. Parent-command verification prevents accidental direct invocation.
+	[ -z "${BWS_ACCESS_TOKEN-}" ] || fail 'do not pass BWS_ACCESS_TOKEN to the dashboard provisioner'
+	parent=$(ps -o command= -p "$PPID" 2>/dev/null || :)
+	case "$parent" in *bws-project*' run -- '*) ;; *) fail 'run dashboard provisioning only through bws-project run --' ;; esac
+}
+
+require_value() {
+	name=$1 value=$2
+	[ -n "$value" ] || fail "missing $name"
+	newline='
+'
+	carriage=$(printf '\r')
+	case "$value" in *"$newline"*|*"$carriage"*) fail "unsafe newline in $name";; esac
+}
+
+validate_base_url() {
+	case "$1" in https://[A-Za-z0-9.-]* ) ;; *) fail 'base URL must be an HTTPS origin' ;; esac
+	case "$1" in *'?'*|*'#'*|*'/'/) fail 'base URL must not contain a path, query, or fragment' ;; esac
+}
+
+curl_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+curl_config() {
+	printf 'header = "Authorization: Basic %s"\n' "$(curl_escape "$basic")"
+	printf 'silent\nshow-error\n'
+}
+http() {
+	method=$1 url=$2 input=$3 output=$4
+	case "$method" in GET) curl_config | curl --config - --connect-timeout 5 --max-time 20 --max-filesize 4194304 --request GET --output "$output" --write-out '%{http_code}' "$url";;
+	POST|PUT) curl_config | curl --config - --connect-timeout 5 --max-time 20 --max-filesize 4194304 --request "$method" --header 'Content-Type: application/json' --data-binary "@$input" --output "$output" --write-out '%{http_code}' "$url";;
+	*) return 2;; esac
+}
+
+canonical() {
+	# The API owns IDs, timestamps, owner/role, and response wrapper metadata.
+	# The tracked object owns every portable dashboard contract field.
+	jq -S '
+		walk(
+			if type == "object" then
+				del(.base_map, .map_view)
+				| if (.legends_position? == null) then del(.legends_position) else . end
+				| if (.filter? | type) == "object" then .filter |= del(.column, .operator, .value) else . end
+			else . end
+		)
+		| del(.dashboardId, .dashboard_id, .owner, .role, .created, .updatedAt, .updated_at, .hash)
+		+ {folder_id:"default"}
+	' "$1"
+}
+
+require_dashboard_response() {
+	response=$1 title=$2
+	jq -e --arg title "$title" '
+		(type == "object") and (.version == 8) and (.hash | type == "string" and test("^[0-9]+$")) and
+		(.v8 | type == "object" and (.dashboardId | type == "string" and test("^[A-Za-z0-9_-]{1,128}$")) and (.title == $title) and (.version == 8) and (.tabs | type == "array" and length > 0))
+	' "$response" >/dev/null
+}
+
+fetch_existing() {
+	title=$1
+	status=$(http GET "$base_url/api/default/dashboards?folder=default&title=$(printf '%s' "$title" | sed 's/ /%20/g')" /dev/null "$tmp_dir/list.json") || return 1
+	[ "$status" = 200 ] || return 1
+	jq -e --arg title "$title" '
+		(.dashboards | type == "array") and
+		([.dashboards[] | select(.title == $title)] | length <= 1) and
+		([.dashboards[] | select(.title == $title)] | all(.[]; (.dashboard_id | type == "string" and test("^[A-Za-z0-9_-]{1,128}$")) and (.folder_id == "default") and (.version == 8) and (.hash | type == "string" and test("^[0-9]+$"))))
+	' "$tmp_dir/list.json" >/dev/null || return 1
+	# An absent exact title is an expected, successful create path. Do not use
+	# jq -e here: it turns the empty result into a failed shell command.
+	jq -r --arg title "$title" '([.dashboards[] | select(.title == $title)][0].dashboard_id) // ""' "$tmp_dir/list.json"
+}
+
+get_dashboard() {
+	id=$1 title=$2
+	status=$(http GET "$base_url/api/default/dashboards/$id?folder=default" /dev/null "$tmp_dir/get.json") || return 1
+	[ "$status" = 200 ] || return 1
+	require_dashboard_response "$tmp_dir/get.json" "$title" || return 1
+	jq -r '.v8.dashboardId' "$tmp_dir/get.json"
+}
+
+put_dashboard() {
+	id=$1 title=$2 payload=$3 retry=$4
+	hash=$(jq -er '.hash' "$tmp_dir/get.json") || return 1
+	status=$(http PUT "$base_url/api/default/dashboards/$id?folder=default&hash=$hash" "$payload" "$tmp_dir/put.json") || return 1
+	case "$status" in
+	200) require_dashboard_response "$tmp_dir/put.json" "$title" ;;
+	409)
+		[ "$retry" = 0 ] || return 1
+		get_dashboard "$id" "$title" >/dev/null || return 1
+		put_dashboard "$id" "$title" "$payload" 1
+		;;
+	*) return 1 ;;
+	esac
+}
+
+verify_dashboard() {
+	title=$1 payload=$2
+	id=$(fetch_existing "$title") || return 1
+	[ -n "$id" ] || return 1
+	get_dashboard "$id" "$title" >/dev/null || return 1
+	canonical "$payload" > "$tmp_dir/expected.json" || return 1
+	jq '.v8' "$tmp_dir/get.json" | canonical /dev/stdin > "$tmp_dir/actual.json" || return 1
+	cmp -s "$tmp_dir/expected.json" "$tmp_dir/actual.json" || return 1
+	panel_ids=$(jq -r '.tabs[].panels[].id' "$payload" | LC_ALL=C sort | tr '\n' ',') || return 1
+	remote_panel_ids=$(jq -r '.v8.tabs[].panels[].id' "$tmp_dir/get.json" | LC_ALL=C sort | tr '\n' ',') || return 1
+	[ "$panel_ids" = "$remote_panel_ids" ] || return 1
+	sha256=$(shasum -a 256 "$tmp_dir/expected.json" | awk '{print $1}') || return 1
+	printf 'dashboard verified: title=%s canonical_sha256=%s\n' "$title" "$sha256"
+}
+
+provision_dashboard() {
+	payload=$1
+	title=$(jq -er '.title' "$payload") || return 1
+	id=$(fetch_existing "$title") || return 1
+	if [ -z "$id" ]; then
+		status=$(http POST "$base_url/api/default/dashboards?folder=default" "$payload" "$tmp_dir/create.json") || return 1
+		case "$status" in 200|201) require_dashboard_response "$tmp_dir/create.json" "$title" || return 1;; *) return 1;; esac
+		id=$(jq -r '.v8.dashboardId' "$tmp_dir/create.json")
+	fi
+	get_dashboard "$id" "$title" >/dev/null || return 1
+	put_dashboard "$id" "$title" "$payload" 0 || return 1
+	verify_dashboard "$title" "$payload"
+}
+
+self_test() {
+	# Exercise the absent -> POST -> GET -> PUT -> verify path without network
+	# access or credentials. The curl stub only sees a config stream and records
+	# non-secret methods/URLs, proving the root identity is not in curl argv.
+	umask 077
+	tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/observability-dashboards-self.XXXXXX") || fail 'cannot create self-test directory'
+	stub_bin=$tmp_dir/bin
+	state_dir=$tmp_dir/state
+	mkdir -p "$stub_bin" "$state_dir"
+	cat > "$stub_bin/curl" <<'STUB'
+#!/bin/sh
+set -eu
+config=$(cat)
+case "$config" in *'Authorization: Basic '*) ;; *) exit 91;; esac
+argv=$*
+case "$argv" in *SELF_USER*|*SELF_PASSWORD*) exit 92;; esac
+out= method= url= payload=
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	--config|--connect-timeout|--max-time|--max-filesize|--request|--header|--data-binary|--output|--write-out)
+		case "$1" in --request) method=$2;; --data-binary) payload=${2#@};; --output) out=$2;; esac
+		shift 2 ;;
+	*) url=$1; shift ;;
+	esac
+done
+printf '%s %s\n' "$method" "$url" >> "$OBS_DASHBOARD_SELF_STATE/requests"
+case "$url" in
+*'/dashboards?folder=default&title='*)
+	if [ -f "$OBS_DASHBOARD_SELF_STATE/dashboard.json" ]; then
+		jq '{dashboards:[{title:.v8.title,dashboard_id:.v8.dashboardId,folder_id:"default",version:.version,hash:.hash}]}' "$OBS_DASHBOARD_SELF_STATE/dashboard.json" > "$out"
+	else printf '{"dashboards":[]}' > "$out"; fi
+	;;
+*'/dashboards?folder=default')
+	[ -n "$payload" ] || exit 93
+	jq '{version:8,hash:"123",v8:(del(.folder_id) + {dashboardId:"dash-self",owner:"self",role:"",created:"2026-01-01T00:00:00+00:00"})}' "$payload" > "$OBS_DASHBOARD_SELF_STATE/dashboard.json"
+	cp "$OBS_DASHBOARD_SELF_STATE/dashboard.json" "$out"
+	;;
+*'/dashboards/dash-self?folder=default'*)
+	[ -f "$OBS_DASHBOARD_SELF_STATE/dashboard.json" ] || exit 94
+	cp "$OBS_DASHBOARD_SELF_STATE/dashboard.json" "$out"
+	;;
+*) exit 95;;
+esac
+printf 200
+STUB
+	chmod 0755 "$stub_bin/curl"
+	basic=$(printf '%s:%s' SELF_USER SELF_PASSWORD | base64 | tr -d '\n')
+	base_url=https://observe.self.invalid
+	OBS_DASHBOARD_PROVISIONER_SELF_TEST_ACTIVE=1 "$repo_dir/tests/observability-dashboards.sh" >/dev/null || fail 'tracked dashboard contract failed in self-test'
+	PATH="$stub_bin:$PATH" OBS_DASHBOARD_SELF_STATE="$state_dir" provision_dashboard "$dash_dir/homelab-foundation.json"
+	rm -f "$state_dir/dashboard.json"
+	PATH="$stub_bin:$PATH" OBS_DASHBOARD_SELF_STATE="$state_dir" provision_dashboard "$dash_dir/ai-tool-usage.json"
+	[ "$(grep -c '^POST ' "$state_dir/requests")" = 2 ] || fail 'absent dashboard did not take POST create path'
+	[ "$(grep -c '^PUT ' "$state_dir/requests")" = 2 ] || fail 'dashboard did not take hash-protected PUT path'
+}
+
+[ "$#" -eq 1 ] && [ "$1" = --self-test ] && { self_test; exit 0; }
+[ "$#" -eq 1 ] || [ "$#" -eq 2 ] || usage
+mode=provision
+if [ "$#" -eq 2 ]; then [ "$1" = --verify ] || usage; mode=verify; base_url=$2; else base_url=$1; fi
+validate_base_url "$base_url"
+require_bws_runtime
+root_email=$(printenv ZO_ROOT_USER_EMAIL || :)
+root_password=$(printenv ZO_ROOT_USER_PASSWORD || :)
+require_value ZO_ROOT_USER_EMAIL "$root_email"
+require_value ZO_ROOT_USER_PASSWORD "$root_password"
+umask 077
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/observability-dashboards.XXXXXX") || fail 'cannot create private temporary directory'
+basic=$(printf '%s:%s' "$root_email" "$root_password" | base64 | tr -d '\n')
+"$repo_dir/tests/observability-dashboards.sh" >/dev/null || fail 'tracked dashboard contract failed'
+for payload in "$dash_dir/homelab-foundation.json" "$dash_dir/ai-tool-usage.json"; do
+	case "$mode" in provision) provision_dashboard "$payload" || fail 'dashboard provision operation failed';; verify) verify_dashboard "$(jq -er '.title' "$payload")" "$payload" || fail 'dashboard verification failed';; esac
+done

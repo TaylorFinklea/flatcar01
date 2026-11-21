@@ -1,0 +1,53 @@
+{
+  "version": 8,
+  "folder_id": "default",
+  "title": "AI Tool Usage",
+  "description": "Metadata-only AI telemetry. All aggregates exclude synthetic validation traffic by default.",
+  "defaultDatetimeDuration": { "type": "relative", "relativeTimePeriod": "24h" },
+  "tabs": [
+    {
+      "tabId": "ai-tool-usage",
+      "name": "Usage",
+      "panels": [
+        {
+          "id": "no-real-senders", "type": "markdown", "title": "Real sender status", "description": "Honest initial state.", "config": { "show_legends": false }, "queryType": "sql", "queries": [], "markdownContent": "## No real AI senders yet\n\nThis dashboard excludes synthetic validation data from its totals. Real Codex, Claude, Pi, OMP, and other tool instrumentation remains out of scope for this foundation.", "layout": { "x": 0, "y": 0, "w": 192, "h": 14, "i": 101 }
+        },
+        {
+          "id": "run-volume", "type": "line", "title": "Run and task volume", "description": "AI run count; synthetic records excluded.", "config": { "show_legends": true, "legends_position": "bottom" }, "queryType": "sql",
+          "queries": [{ "query": "SELECT histogram(_timestamp) AS ts, sum(value) AS runs FROM \"ai_run_count\" WHERE telemetry_synthetic = 'false' GROUP BY ts ORDER BY ts", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "ai_run_count", "stream_type": "metrics", "x": [{ "label": "ts", "alias": "ts", "column": "ts", "type": "raw", "color": null }], "y": [{ "label": "runs", "alias": "runs", "column": "runs", "type": "raw", "color": null }], "z": [], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }], "layout": { "x": 0, "y": 14, "w": 64, "h": 18, "i": 102 }
+        },
+        {
+          "id": "success-error", "type": "line", "title": "Success and error rate", "description": "Status breakdown; synthetic records excluded.", "config": { "show_legends": true, "legends_position": "bottom" }, "queryType": "sql",
+          "queries": [{ "query": "SELECT histogram(_timestamp) AS ts, ai_status AS status, sum(value) AS runs FROM \"ai_run_count\" WHERE telemetry_synthetic = 'false' GROUP BY ts, status ORDER BY ts", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "ai_run_count", "stream_type": "metrics", "x": [{ "label": "ts", "alias": "ts", "column": "ts", "type": "raw", "color": null }], "y": [{ "label": "runs", "alias": "runs", "column": "runs", "type": "raw", "color": null }], "z": [{ "label": "status", "alias": "status", "column": "status", "type": "raw", "color": null }], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }], "layout": { "x": 64, "y": 14, "w": 64, "h": 18, "i": 103 }
+        },
+        {
+          "id": "duration", "type": "line", "title": "Run duration", "description": "Reported numeric duration; synthetic records excluded.", "config": { "show_legends": true, "legends_position": "bottom" }, "queryType": "sql",
+          "queries": [{ "query": "SELECT histogram(_timestamp) AS ts, avg(value) AS duration FROM \"ai_run_duration\" WHERE telemetry_synthetic = 'false' GROUP BY ts ORDER BY ts", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "ai_run_duration", "stream_type": "metrics", "x": [{ "label": "ts", "alias": "ts", "column": "ts", "type": "raw", "color": null }], "y": [{ "label": "duration", "alias": "duration", "column": "duration", "type": "raw", "color": null }], "z": [], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }], "layout": { "x": 128, "y": 14, "w": 64, "h": 18, "i": 104 }
+        },
+        {
+          "id": "tokens", "type": "line", "title": "Tokens by type", "description": "Input and output tokens; synthetic records excluded.", "config": { "show_legends": true, "legends_position": "bottom" }, "queryType": "sql",
+          "queries": [
+            { "query": "SELECT histogram(_timestamp) AS ts, sum(value) AS tokens FROM \"ai_tokens_input\" WHERE telemetry_synthetic = 'false' GROUP BY ts ORDER BY ts", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "ai_tokens_input", "stream_type": "metrics", "x": [{ "label": "ts", "alias": "ts", "column": "ts", "type": "raw", "color": null }], "y": [{ "label": "tokens", "alias": "tokens", "column": "tokens", "type": "raw", "color": null }], "z": [], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "input" } },
+            { "query": "SELECT histogram(_timestamp) AS ts, sum(value) AS tokens FROM \"ai_tokens_output\" WHERE telemetry_synthetic = 'false' GROUP BY ts ORDER BY ts", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "ai_tokens_output", "stream_type": "metrics", "x": [{ "label": "ts", "alias": "ts", "column": "ts", "type": "raw", "color": null }], "y": [{ "label": "tokens", "alias": "tokens", "column": "tokens", "type": "raw", "color": null }], "z": [], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "output" } }
+          ], "layout": { "x": 0, "y": 32, "w": 64, "h": 18, "i": 105 }
+        },
+        {
+          "id": "cost", "type": "line", "title": "Reported cost", "description": "Numeric reported cost; synthetic records excluded.", "config": { "show_legends": true, "legends_position": "bottom", "unit": "currencyUSD" }, "queryType": "sql",
+          "queries": [{ "query": "SELECT histogram(_timestamp) AS ts, sum(value) AS cost FROM \"ai_cost\" WHERE telemetry_synthetic = 'false' GROUP BY ts ORDER BY ts", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "ai_cost", "stream_type": "metrics", "x": [{ "label": "ts", "alias": "ts", "column": "ts", "type": "raw", "color": null }], "y": [{ "label": "cost", "alias": "cost", "column": "cost", "type": "raw", "color": null }], "z": [], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }], "layout": { "x": 64, "y": 32, "w": 64, "h": 18, "i": 106 }
+        },
+        {
+          "id": "provider-model", "type": "bar", "title": "Provider and model", "description": "Metadata-only breakdown; synthetic records excluded.", "config": { "show_legends": true, "legends_position": "bottom" }, "queryType": "sql",
+          "queries": [{ "query": "SELECT ai_provider AS provider, ai_model AS model, sum(value) AS runs FROM \"ai_run_count\" WHERE telemetry_synthetic = 'false' GROUP BY provider, model ORDER BY runs DESC", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "ai_run_count", "stream_type": "metrics", "x": [{ "label": "provider", "alias": "provider", "column": "provider", "type": "raw", "color": null }], "y": [{ "label": "runs", "alias": "runs", "column": "runs", "type": "raw", "color": null }], "z": [{ "label": "model", "alias": "model", "column": "model", "type": "raw", "color": null }], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }], "layout": { "x": 128, "y": 32, "w": 64, "h": 18, "i": 107 }
+        },
+        {
+          "id": "lane-harness", "type": "bar", "title": "Lane and harness", "description": "Metadata-only breakdown; synthetic records excluded.", "config": { "show_legends": true, "legends_position": "bottom" }, "queryType": "sql",
+          "queries": [{ "query": "SELECT ai_lane AS lane, ai_harness AS harness, sum(value) AS runs FROM \"ai_run_count\" WHERE telemetry_synthetic = 'false' GROUP BY lane, harness ORDER BY runs DESC", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "ai_run_count", "stream_type": "metrics", "x": [{ "label": "lane", "alias": "lane", "column": "lane", "type": "raw", "color": null }], "y": [{ "label": "runs", "alias": "runs", "column": "runs", "type": "raw", "color": null }], "z": [{ "label": "harness", "alias": "harness", "column": "harness", "type": "raw", "color": null }], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }], "layout": { "x": 0, "y": 50, "w": 96, "h": 18, "i": 108 }
+        },
+        {
+          "id": "metadata-traces", "type": "table", "title": "Metadata-only trace drill-down", "description": "Approved opaque IDs and normalized AI metadata only; no content-bearing fields.", "config": { "show_legends": false }, "queryType": "sql",
+          "queries": [{ "query": "SELECT operation_name AS operation, ai_provider AS provider, ai_model AS model, ai_lane AS lane, ai_harness AS harness, ai_run_id AS run_id, ai_task_id AS task_id FROM \"default\" WHERE service_telemetry_synthetic = 'false' ORDER BY _timestamp DESC LIMIT 100", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "default", "stream_type": "traces", "x": [{ "label": "operation", "alias": "operation", "column": "operation", "type": "raw", "color": null }], "y": [{ "label": "provider", "alias": "provider", "column": "provider", "type": "raw", "color": null }], "z": [{ "label": "run_id", "alias": "run_id", "column": "run_id", "type": "raw", "color": null }], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }], "layout": { "x": 96, "y": 50, "w": 96, "h": 18, "i": 109 }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "canaries": [
+    "CANARY_HT_PROMPT",
+    "CANARY_HT_RESPONSE",
+    "CANARY_HT_COMMAND",
+    "CANARY_HT_PATH",
+    "CANARY_HT_URL",
+    "CANARY_HT_HEADER",
+    "CANARY_HT_BODY",
+    "CANARY_HT_SECRET"
+  ],
+  "input": {
+    "resource": {
+      "attributes": {
+        "host.name": "untrusted-host",
+        "prompt": "CANARY_HT_PROMPT",
+        "response": "CANARY_HT_RESPONSE",
+        "shell.command": "CANARY_HT_COMMAND",
+        "file.path": "CANARY_HT_PATH",
+        "url.full": "CANARY_HT_URL",
+        "http.request.header.authorization": "CANARY_HT_HEADER",
+        "http.request.body": "CANARY_HT_BODY",
+        "env.secret": "CANARY_HT_SECRET"
+      }
+    },
+    "spans": [
+      {
+        "name": "homelab content trace",
+        "attributes": {
+          "user.text": "CANARY_HT_RESPONSE"
+        }
+      }
+    ]
+  },
+  "expected": {
+    "records": [],
+    "dropped_records": [
+      "homelab traces are not accepted"
+    ]
+  }
+}

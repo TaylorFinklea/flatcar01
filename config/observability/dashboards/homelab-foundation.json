@@ -1,0 +1,81 @@
+{
+  "version": 8,
+  "folder_id": "default",
+  "title": "Homelab Foundation",
+  "description": "Privacy-gated Flatcar, container, Collector, and OpenObserve health. Systemd state is intentionally omitted until the management-denial proof is live-proven.",
+  "defaultDatetimeDuration": { "type": "relative", "relativeTimePeriod": "6h" },
+  "tabs": [
+    {
+      "tabId": "homelab-foundation",
+      "name": "Foundation",
+      "panels": [
+        {
+          "id": "host-cpu", "type": "line", "title": "Host CPU utilization", "description": "Accepted normalized host CPU states.",
+          "config": { "show_legends": true, "legends_position": "bottom", "unit": "percent" }, "queryType": "sql",
+          "queries": [{ "query": "SELECT histogram(_timestamp) AS ts, avg(value) AS cpu FROM \"system_cpu_utilization\" WHERE telemetry_synthetic = 'false' GROUP BY ts ORDER BY ts", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "system_cpu_utilization", "stream_type": "metrics", "x": [{ "label": "ts", "alias": "ts", "column": "ts", "type": "raw", "color": null }], "y": [{ "label": "cpu", "alias": "cpu", "column": "cpu", "type": "raw", "color": null }], "z": [], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }],
+          "layout": { "x": 0, "y": 0, "w": 64, "h": 18, "i": 1 }
+        },
+        {
+          "id": "host-load", "type": "line", "title": "Host load", "description": "One-minute host load average.",
+          "config": { "show_legends": true, "legends_position": "bottom" }, "queryType": "sql",
+          "queries": [{ "query": "SELECT histogram(_timestamp) AS ts, avg(value) AS load FROM \"system_cpu_load_average_1m\" WHERE telemetry_synthetic = 'false' GROUP BY ts ORDER BY ts", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "system_cpu_load_average_1m", "stream_type": "metrics", "x": [{ "label": "ts", "alias": "ts", "column": "ts", "type": "raw", "color": null }], "y": [{ "label": "load", "alias": "load", "column": "load", "type": "raw", "color": null }], "z": [], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }],
+          "layout": { "x": 64, "y": 0, "w": 64, "h": 18, "i": 2 }
+        },
+        {
+          "id": "host-memory", "type": "line", "title": "Host memory", "description": "Normalized memory state totals.",
+          "config": { "show_legends": true, "legends_position": "bottom", "unit": "bytes" }, "queryType": "sql",
+          "queries": [{ "query": "SELECT histogram(_timestamp) AS ts, avg(value) AS bytes FROM \"system_memory_usage\" WHERE telemetry_synthetic = 'false' GROUP BY ts ORDER BY ts", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "system_memory_usage", "stream_type": "metrics", "x": [{ "label": "ts", "alias": "ts", "column": "ts", "type": "raw", "color": null }], "y": [{ "label": "bytes", "alias": "bytes", "column": "bytes", "type": "raw", "color": null }], "z": [], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }],
+          "layout": { "x": 128, "y": 0, "w": 64, "h": 18, "i": 3 }
+        },
+        {
+          "id": "os-disk", "type": "line", "title": "OS disk pressure", "description": "Normalized OS filesystem use.",
+          "config": { "show_legends": true, "legends_position": "bottom", "unit": "bytes" }, "queryType": "sql",
+          "queries": [{ "query": "SELECT histogram(_timestamp) AS ts, avg(value) AS bytes FROM \"homelab_filesystem_used_bytes\" WHERE telemetry_synthetic = 'false' AND storage_role = 'os' GROUP BY ts ORDER BY ts", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "homelab_filesystem_used_bytes", "stream_type": "metrics", "x": [{ "label": "ts", "alias": "ts", "column": "ts", "type": "raw", "color": null }], "y": [{ "label": "bytes", "alias": "bytes", "column": "bytes", "type": "raw", "color": null }], "z": [], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }],
+          "layout": { "x": 0, "y": 18, "w": 64, "h": 18, "i": 4 }
+        },
+        {
+          "id": "nvr-capacity", "type": "line", "title": "NVR capacity", "description": "Normalized NVR roles only; no paths or WWNs.",
+          "config": { "show_legends": true, "legends_position": "bottom", "unit": "bytes" }, "queryType": "sql",
+          "queries": [{ "query": "SELECT histogram(_timestamp) AS ts, avg(value) AS bytes FROM \"homelab_filesystem_available_bytes\" WHERE telemetry_synthetic = 'false' GROUP BY ts ORDER BY ts", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "homelab_filesystem_available_bytes", "stream_type": "metrics", "x": [{ "label": "ts", "alias": "ts", "column": "ts", "type": "raw", "color": null }], "y": [{ "label": "bytes", "alias": "bytes", "column": "bytes", "type": "raw", "color": null }], "z": [], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }],
+          "layout": { "x": 64, "y": 18, "w": 64, "h": 18, "i": 5 }
+        },
+        {
+          "id": "nvr-read-io", "type": "line", "title": "NVR read I/O", "description": "Fixed numeric storage counter.",
+          "config": { "show_legends": true, "legends_position": "bottom", "unit": "bytes" }, "queryType": "sql",
+          "queries": [{ "query": "SELECT histogram(_timestamp) AS ts, sum(value) AS bytes FROM \"homelab_disk_read_bytes\" WHERE telemetry_synthetic = 'false' GROUP BY ts ORDER BY ts", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "homelab_disk_read_bytes", "stream_type": "metrics", "x": [{ "label": "ts", "alias": "ts", "column": "ts", "type": "raw", "color": null }], "y": [{ "label": "bytes", "alias": "bytes", "column": "bytes", "type": "raw", "color": null }], "z": [], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }],
+          "layout": { "x": 128, "y": 18, "w": 64, "h": 18, "i": 6 }
+        },
+        {
+          "id": "lan-throughput", "type": "line", "title": "LAN throughput", "description": "Normalized LAN direction only.",
+          "config": { "show_legends": true, "legends_position": "bottom", "unit": "bytes" }, "queryType": "sql",
+          "queries": [{ "query": "SELECT histogram(_timestamp) AS ts, sum(value) AS bytes FROM \"system_network_io\" WHERE telemetry_synthetic = 'false' GROUP BY ts ORDER BY ts", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "system_network_io", "stream_type": "metrics", "x": [{ "label": "ts", "alias": "ts", "column": "ts", "type": "raw", "color": null }], "y": [{ "label": "bytes", "alias": "bytes", "column": "bytes", "type": "raw", "color": null }], "z": [], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }],
+          "layout": { "x": 0, "y": 36, "w": 64, "h": 18, "i": 7 }
+        },
+        {
+          "id": "container-cpu", "type": "line", "title": "Container CPU", "description": "Approved container metrics only.",
+          "config": { "show_legends": true, "legends_position": "bottom", "unit": "percent" }, "queryType": "sql",
+          "queries": [{ "query": "SELECT histogram(_timestamp) AS ts, avg(value) AS cpu FROM \"container_cpu_utilization\" WHERE telemetry_synthetic = 'false' GROUP BY ts ORDER BY ts", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "container_cpu_utilization", "stream_type": "metrics", "x": [{ "label": "ts", "alias": "ts", "column": "ts", "type": "raw", "color": null }], "y": [{ "label": "cpu", "alias": "cpu", "column": "cpu", "type": "raw", "color": null }], "z": [], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }],
+          "layout": { "x": 64, "y": 36, "w": 64, "h": 18, "i": 8 }
+        },
+        {
+          "id": "container-memory", "type": "line", "title": "Container memory", "description": "Approved container metrics only.",
+          "config": { "show_legends": true, "legends_position": "bottom", "unit": "bytes" }, "queryType": "sql",
+          "queries": [{ "query": "SELECT histogram(_timestamp) AS ts, avg(value) AS bytes FROM \"container_memory_usage_total\" WHERE telemetry_synthetic = 'false' GROUP BY ts ORDER BY ts", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "container_memory_usage_total", "stream_type": "metrics", "x": [{ "label": "ts", "alias": "ts", "column": "ts", "type": "raw", "color": null }], "y": [{ "label": "bytes", "alias": "bytes", "column": "bytes", "type": "raw", "color": null }], "z": [], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }],
+          "layout": { "x": 128, "y": 36, "w": 64, "h": 18, "i": 9 }
+        },
+        {
+          "id": "collector-loss", "type": "line", "title": "Collector export health", "description": "Successful exporter point count; a failure stream appears only when failures occur.",
+          "config": { "show_legends": true, "legends_position": "bottom" }, "queryType": "sql",
+          "queries": [{ "query": "SELECT histogram(_timestamp) AS ts, sum(value) AS points FROM \"otelcol_exporter_sent_metric_points\" WHERE telemetry_synthetic = 'false' GROUP BY ts ORDER BY ts", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "otelcol_exporter_sent_metric_points", "stream_type": "metrics", "x": [{ "label": "ts", "alias": "ts", "column": "ts", "type": "raw", "color": null }], "y": [{ "label": "points", "alias": "points", "column": "points", "type": "raw", "color": null }], "z": [], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }],
+          "layout": { "x": 0, "y": 54, "w": 96, "h": 18, "i": 10 }
+        },
+        {
+          "id": "openobserve-ingest", "type": "line", "title": "OpenObserve ingestion", "description": "OpenObserve container CPU as an ingestion health proxy.",
+          "config": { "show_legends": true, "legends_position": "bottom", "unit": "percent" }, "queryType": "sql",
+          "queries": [{ "query": "SELECT histogram(_timestamp) AS ts, avg(value) AS cpu FROM \"container_cpu_utilization\" WHERE telemetry_synthetic = 'false' AND container_name = 'openobserve' GROUP BY ts ORDER BY ts", "vrlFunctionQuery": null, "customQuery": true, "fields": { "stream": "container_cpu_utilization", "stream_type": "metrics", "x": [{ "label": "ts", "alias": "ts", "column": "ts", "type": "raw", "color": null }], "y": [{ "label": "cpu", "alias": "cpu", "column": "cpu", "type": "raw", "color": null }], "z": [], "filter": { "type": "list", "values": [], "logicalOperator": "AND", "filterType": "list" } }, "config": { "promql_legend": "" } }],
+          "layout": { "x": 96, "y": 54, "w": 96, "h": 18, "i": 11 }
+        }
+      ]
+    }
+  ]
+}

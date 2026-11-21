@@ -1,0 +1,66 @@
+#!/bin/sh
+# Source-only deployment controller. It never selects a target implicitly.
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
+. "$script_dir/observability-operation-lib"
+
+usage() { echo "usage: $0 {stage|start-bootstrap|start-stack} <ssh-target> <preflight-receipt>" >&2; exit 2; }
+fail() { echo "$1" >&2; exit 1; }
+
+remote() {
+	command=$1
+	shift
+	if [ -n "${OBSERVABILITY_REMOTE_ROOT:-}" ]; then
+		OBSERVABILITY_REMOTE_LIB="$script_dir/observability-operation-lib" OBSERVABILITY_REMOTE_ROOT="$OBSERVABILITY_REMOTE_ROOT" "$script_dir/observability-remote" "$command" "$@"
+		return
+	fi
+	# The executor is a tracked non-secret program copied into tmpfs for this
+	# operation. The artifact archive below is still restricted to ops_map.
+	{ cat "$script_dir/observability-operation-lib"; cat "$script_dir/observability-remote"; } | ssh -o BatchMode=yes "$target" "sudo install -d -m 0700 /run/observability-operation && sudo install -m 0700 /dev/stdin /run/observability-operation/runner"
+	ssh -o BatchMode=yes "$target" "sudo /run/observability-operation/runner $command $*"
+}
+
+archive_stage() {
+	stage_dir=$(mktemp -d "${TMPDIR:-/tmp}/observability-stage.XXXXXX") || fail 'cannot create source archive'
+	trap 'rm -rf "$stage_dir"' EXIT HUP INT TERM
+	ops_manifest "$repo_dir" > "$stage_dir/.observability-manifest" || fail 'invalid canonical artifact map'
+	source=$(ops_manifest_digest "$stage_dir/.observability-manifest")
+	[ "$source" = "$OPS_RECEIPT_SOURCE" ] || fail 'receipt source mismatch'
+	set --
+	while IFS='|' read -r path ignored; do set -- "$@" "$path"; done <<EOF
+$(ops_map)
+EOF
+	# Feed the manifest only as a generated staging file; it contains no secrets.
+	# macOS tar otherwise writes AppleDouble/extended-attribute records that
+	# Flatcar's archive reader rejects. The archive remains restricted to ops_map.
+	( cd "$repo_dir" && tar --no-xattrs --no-mac-metadata -cf - "$@" -C "$stage_dir" .observability-manifest ) | remote stage "$source" "$OPS_RECEIPT_BASELINE" "$OPS_RECEIPT_PREFLIGHT" "$OPS_RECEIPT_RECORDING_NVR" "$OPS_RECEIPT_RECORDING_NVR2"
+	trap - EXIT HUP INT TERM
+	rm -rf "$stage_dir"
+}
+
+[ "$#" -eq 3 ] || usage
+mode=$1
+requested_target=$2
+target=$requested_target
+receipt=$3
+ops_target "$target" || fail 'invalid SSH target'
+ops_receipt "$receipt" || fail 'invalid preflight receipt'
+[ "$OPS_RECEIPT_TARGET" = "$requested_target" ] || fail 'receipt target mismatch'
+target=$requested_target
+
+case "$mode" in
+	stage) archive_stage; echo 'stage: verified and staged' ;;
+	start-bootstrap|start-stack)
+		manifest=$(mktemp "${TMPDIR:-/tmp}/observability-manifest.XXXXXX") || fail 'cannot validate source'
+		trap 'rm -f "$manifest"' EXIT HUP INT TERM
+		ops_manifest "$repo_dir" > "$manifest" || fail 'invalid canonical artifact map'
+		[ "$(ops_manifest_digest "$manifest")" = "$OPS_RECEIPT_SOURCE" ] || fail 'receipt source mismatch'
+		rm -f "$manifest"
+		trap - EXIT HUP INT TERM
+		remote "$mode" "$OPS_RECEIPT_SOURCE" "$OPS_RECEIPT_BASELINE" "$OPS_RECEIPT_PREFLIGHT"
+		echo "$mode: verified"
+		;;
+	*) usage ;;
+esac

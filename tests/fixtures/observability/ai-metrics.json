@@ -1,0 +1,47 @@
+{
+  "canaries": [
+    "CANARY_AM_PROMPT",
+    "CANARY_AM_RESPONSE",
+    "CANARY_AM_COMMAND",
+    "CANARY_AM_PATH",
+    "CANARY_AM_URL",
+    "CANARY_AM_HEADER",
+    "CANARY_AM_BODY",
+    "CANARY_AM_SECRET"
+  ],
+  "input": {
+    "resource": {
+      "attributes": {
+        "host.name": "untrusted-host",
+        "service.name": "CANARY_AM_PROMPT",
+        "telemetry.synthetic": true,
+        "conversation.title": "CANARY_AM_RESPONSE",
+        "file.path": "CANARY_AM_PATH",
+        "url.full": "CANARY_AM_URL",
+        "http.request.header.authorization": "CANARY_AM_HEADER",
+        "http.request.body": "CANARY_AM_BODY",
+        "env.secret": "CANARY_AM_SECRET"
+      }
+    },
+    "metrics": [
+      {"name": "ai.run.count", "attributes": {"ai.tool": "codex", "ai.harness": "codex", "ai.role": "lead", "ai.provider": "openai", "ai.model": "gpt-5.6", "ai.lane": "local", "ai.operation": "run", "ai.status": "ok", "ai.error.class": "none", "ai.instrumentation.version": "v1", "ai.currency": "USD", "ai.run.id": "run_123", "ai.task.id": "task_456"}, "value": 1},
+      {"name": "ai.run.duration", "attributes": {"ai.tool": "codex", "ai.harness": "codex", "ai.role": "lead", "ai.provider": "openai", "ai.model": "gpt-5.6", "ai.lane": "local", "ai.operation": "run", "ai.status": "ok", "ai.error.class": "none", "ai.instrumentation.version": "v1", "ai.currency": "USD", "ai.run.id": "run_123", "ai.task.id": "task_456"}, "value": 1.2},
+      {"name": "ai.tokens.input", "attributes": {"ai.tool": "codex", "ai.harness": "codex", "ai.role": "lead", "ai.provider": "openai", "ai.model": "gpt-5.6", "ai.lane": "local", "ai.operation": "run", "ai.status": "ok", "ai.error.class": "none", "ai.instrumentation.version": "v1", "ai.currency": "USD", "ai.run.id": "run_123", "ai.task.id": "task_456"}, "value": 100},
+      {"name": "ai.tokens.output", "attributes": {"ai.tool": "codex", "ai.harness": "codex", "ai.role": "lead", "ai.provider": "openai", "ai.model": "gpt-5.6", "ai.lane": "local", "ai.operation": "run", "ai.status": "ok", "ai.error.class": "none", "ai.instrumentation.version": "v1", "ai.currency": "USD", "ai.run.id": "run_123", "ai.task.id": "task_456"}, "value": 40},
+      {"name": "ai.cost", "attributes": {"ai.tool": "codex", "ai.harness": "codex", "ai.role": "lead", "ai.provider": "openai", "ai.model": "gpt-5.6", "ai.lane": "local", "ai.operation": "run", "ai.status": "ok", "ai.error.class": "none", "ai.instrumentation.version": "v1", "ai.currency": "USD", "ai.run.id": "run_123", "ai.task.id": "task_456"}, "value": 0.01},
+      {"name": "ai.private.payload", "attributes": {"ai.tool": "invalid value with spaces and CANARY_AM_COMMAND", "user.text": "CANARY_AM_RESPONSE"}, "value": 1}
+    ]
+  },
+  "expected": {
+    "records": [
+      {"name": "ai.run.count", "resource": {"host.name": "scrypted-nvr", "telemetry.synthetic": true}},
+      {"name": "ai.run.duration", "resource": {"host.name": "scrypted-nvr", "telemetry.synthetic": true}},
+      {"name": "ai.tokens.input", "resource": {"host.name": "scrypted-nvr", "telemetry.synthetic": true}},
+      {"name": "ai.tokens.output", "resource": {"host.name": "scrypted-nvr", "telemetry.synthetic": true}},
+      {"name": "ai.cost", "resource": {"host.name": "scrypted-nvr", "telemetry.synthetic": true}}
+    ],
+    "dropped_records": [
+      "ai.private.payload"
+    ]
+  }
+}

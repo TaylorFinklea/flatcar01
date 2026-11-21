@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+marker_path=/etc/observability/systemd-metrics-approved
+marker_mode=0:0:644
+config_file=/etc/observability/otel-gateway.yaml
+systemd_metrics_approved=false
+
+if [ -e "$marker_path" ] || [ -L "$marker_path" ]; then
+  if [ ! -f "$marker_path" ] || [ -L "$marker_path" ] || [ "$(/usr/bin/stat -c "%u:%g:%a" "$marker_path")" != "$marker_mode" ]; then
+    echo "invalid systemd metrics approval marker" >&2
+    exit 1
+  fi
+  config_file=/etc/observability/otel-gateway-systemd.yaml
+  systemd_metrics_approved=true
+fi
+
+set -- \
+  /usr/bin/docker run \
+  --name otel-collector \
+  --pull=never \
+  --network host \
+  --user 10001:10001 \
+  --read-only \
+  --cap-drop=ALL \
+  --security-opt no-new-privileges \
+  --memory=512m \
+  --cpus=1.0 \
+  --pids-limit=256 \
+  --env GOMEMLIMIT=384MiB \
+  --env-file /etc/observability/secrets/otel-collector.env \
+  --mount type=bind,source="$config_file",target=/etc/otelcol/config.yaml,readonly \
+  --mount type=bind,source=/var/lib/otelcol,target=/var/lib/otelcol \
+  --mount type=bind,source=/proc/stat,target=/proc/stat,readonly \
+  --mount type=bind,source=/proc/meminfo,target=/proc/meminfo,readonly \
+  --mount type=bind,source=/proc/loadavg,target=/proc/loadavg,readonly \
+  --mount type=bind,source=/proc/uptime,target=/proc/uptime,readonly \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=32m,uid=10001,gid=10001,mode=0700 \
+  --log-driver journald
+
+if [ "$systemd_metrics_approved" = true ]; then
+  set -- "$@" --mount type=bind,source=/run/dbus/system_bus_socket,target=/run/dbus/system_bus_socket,readonly
+fi
+
+set -- "$@" "$OTELCOL_IMAGE" --config=/etc/otelcol/config.yaml --feature-gates=+ottl.set.allowNil
+exec "$@"

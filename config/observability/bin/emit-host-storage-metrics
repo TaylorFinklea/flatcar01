@@ -1,0 +1,214 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -eq 0 ]; then
+	tool_root=/usr/bin
+	sys_root=/sys/class/block
+elif [ "$#" -eq 2 ] && [ "$1" = --test-root ] && [ "${OBSERVABILITY_HOST_PROBE_TEST_MODE:-}" = 1 ]; then
+	test_root=$2
+	case "$test_root" in
+		/*) ;;
+		*) exit 1 ;;
+	esac
+	tool_root=$test_root/bin
+	sys_root=$test_root/sys/class/block
+else
+	exit 1
+fi
+
+jq=$tool_root/jq
+curl=$tool_root/curl
+date=$tool_root/date
+findmnt=$tool_root/findmnt
+readlink=$tool_root/readlink
+lsblk=$tool_root/lsblk
+stat=$tool_root/stat
+awk=$tool_root/awk
+
+for tool in "$jq" "$curl" "$date" "$findmnt" "$readlink" "$lsblk" "$stat" "$awk"; do
+	[ -x "$tool" ] || exit 1
+done
+
+timestamp=$($date +%s%N 2>/dev/null) || exit 1
+case "$timestamp" in
+	''|*[!0-9]*) exit 1 ;;
+esac
+
+numeric_triplet() {
+	case "$1" in
+		''|*[!0-9\ ]*) return 1 ;;
+	esac
+	set -- $1
+	[ "$#" -eq 3 ]
+}
+
+numeric_quad() {
+	case "$1" in
+		''|*[!0-9\ ]*) return 1 ;;
+	esac
+	set -- $1
+	[ "$#" -eq 4 ]
+}
+
+bounded_decimal() {
+	case "$1" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	value=$1
+	while [ "${value#0}" != "$value" ]; do
+		value=${value#0}
+	done
+	[ -n "$value" ] || value=0
+	max_digits=${2:-15}
+	[ "${#value}" -le "$max_digits" ]
+}
+
+revalidate_mount() {
+	current_source=$($findmnt -n -o SOURCE --target "$mount_path" 2>/dev/null) || return 1
+	current_canonical=$($readlink -f "$current_source" 2>/dev/null) || return 1
+	[ "$current_canonical" = "$canonical_source" ] || return 1
+	if [ -n "$expected_identity" ]; then
+		current_identity=$($readlink -f "$expected_identity" 2>/dev/null) || return 1
+		[ "$current_canonical" = "$current_identity" ] || return 1
+	fi
+}
+
+collect_role() {
+	role=$1
+	mount_path=$2
+	expected_identity=$3
+	valid=0
+	capacity=0
+	used=0
+	available=0
+	read_bytes=0
+	write_bytes=0
+	read_operations=0
+	write_operations=0
+
+	if ! source=$($findmnt -n -o SOURCE --target "$mount_path" 2>/dev/null); then
+		printf '%s %s %s %s %s %s %s %s\n' "$valid" "$capacity" "$used" "$available" "$read_bytes" "$write_bytes" "$read_operations" "$write_operations"
+		return 0
+	fi
+	canonical_source=$($readlink -f "$source" 2>/dev/null) || {
+		printf '%s %s %s %s %s %s %s %s\n' "$valid" "$capacity" "$used" "$available" "$read_bytes" "$write_bytes" "$read_operations" "$write_operations"
+		return 0
+	}
+	if [ -n "$expected_identity" ]; then
+		canonical_identity=$($readlink -f "$expected_identity" 2>/dev/null) || {
+			printf '%s %s %s %s %s %s %s %s\n' "$valid" "$capacity" "$used" "$available" "$read_bytes" "$write_bytes" "$read_operations" "$write_operations"
+			return 0
+		}
+		[ "$canonical_source" = "$canonical_identity" ] || {
+			printf '%s %s %s %s %s %s %s %s\n' "$valid" "$capacity" "$used" "$available" "$read_bytes" "$write_bytes" "$read_operations" "$write_operations"
+			return 0
+		}
+	fi
+
+	filesystem_stats=$($stat -f -c '%b %f %S' "$mount_path" 2>/dev/null) || {
+		printf '%s %s %s %s %s %s %s %s\n' "$valid" "$capacity" "$used" "$available" "$read_bytes" "$write_bytes" "$read_operations" "$write_operations"
+		return 0
+	}
+	numeric_triplet "$filesystem_stats" || return 2
+	set -- $filesystem_stats
+	blocks=$1
+	free_blocks=$2
+	block_size=$3
+	bounded_decimal "$blocks" 12 || return 2
+	bounded_decimal "$free_blocks" 12 || return 2
+	bounded_decimal "$block_size" || return 2
+	[ "$free_blocks" -le "$blocks" ] || return 2
+	[ "$block_size" -gt 0 ] && [ "$block_size" -le 4096 ] || return 2
+	capacity=$((blocks * block_size))
+	available=$((free_blocks * block_size))
+	used=$((capacity - available))
+	revalidate_mount || {
+		printf '%s %s %s %s %s %s %s %s\n' 0 0 0 0 0 0 0 0
+		return 0
+	}
+
+	parent=$($lsblk -ndo PKNAME "$canonical_source" 2>/dev/null) || return 2
+	case "$parent" in
+		''|.|..|*[!A-Za-z0-9._-]*) return 2 ;;
+	esac
+	disk_stats=$($awk '{print $1, $5, $3, $7}' "$sys_root/$parent/stat" 2>/dev/null) || return 2
+	numeric_quad "$disk_stats" || return 2
+	set -- $disk_stats
+	read_operations=$1
+	write_operations=$2
+	read_sectors=$3
+	write_sectors=$4
+	bounded_decimal "$read_operations" || return 2
+	bounded_decimal "$write_operations" || return 2
+	bounded_decimal "$read_sectors" || return 2
+	bounded_decimal "$write_sectors" || return 2
+	read_bytes=$((read_sectors * 512))
+	write_bytes=$((write_sectors * 512))
+	revalidate_mount || {
+		printf '%s %s %s %s %s %s %s %s\n' 0 0 0 0 0 0 0 0
+		return 0
+	}
+	valid=1
+	printf '%s %s %s %s %s %s %s %s\n' "$valid" "$capacity" "$used" "$available" "$read_bytes" "$write_bytes" "$read_operations" "$write_operations"
+}
+
+os_values=$(collect_role os / '') || exit $?
+set -- $os_values
+os_valid=$1; os_capacity=$2; os_used=$3; os_available=$4; os_read_bytes=$5; os_write_bytes=$6; os_read_operations=$7; os_write_operations=$8
+
+if primary_values=$(collect_role nvr_primary /var/lib/scrypted/nvr /dev/disk/by-id/wwn-0x5000000000000001-part1); then
+	:
+else
+	exit 1
+fi
+set -- $primary_values
+primary_valid=$1; primary_capacity=$2; primary_used=$3; primary_available=$4; primary_read_bytes=$5; primary_write_bytes=$6; primary_read_operations=$7; primary_write_operations=$8
+
+if secondary_values=$(collect_role nvr_secondary /var/lib/scrypted/nvr2 /dev/disk/by-id/wwn-0x5000000000000002-part1); then
+	:
+else
+	exit 1
+fi
+set -- $secondary_values
+secondary_valid=$1; secondary_capacity=$2; secondary_used=$3; secondary_available=$4; secondary_read_bytes=$5; secondary_write_bytes=$6; secondary_read_operations=$7; secondary_write_operations=$8
+
+metrics=$($jq -cn \
+	--argjson timestamp "$timestamp" \
+	--argjson os_valid "$os_valid" --argjson os_capacity "$os_capacity" --argjson os_used "$os_used" --argjson os_available "$os_available" --argjson os_read_bytes "$os_read_bytes" --argjson os_write_bytes "$os_write_bytes" --argjson os_read_operations "$os_read_operations" --argjson os_write_operations "$os_write_operations" \
+	--argjson primary_valid "$primary_valid" --argjson primary_capacity "$primary_capacity" --argjson primary_used "$primary_used" --argjson primary_available "$primary_available" --argjson primary_read_bytes "$primary_read_bytes" --argjson primary_write_bytes "$primary_write_bytes" --argjson primary_read_operations "$primary_read_operations" --argjson primary_write_operations "$primary_write_operations" \
+	--argjson secondary_valid "$secondary_valid" --argjson secondary_capacity "$secondary_capacity" --argjson secondary_used "$secondary_used" --argjson secondary_available "$secondary_available" --argjson secondary_read_bytes "$secondary_read_bytes" --argjson secondary_write_bytes "$secondary_write_bytes" --argjson secondary_read_operations "$secondary_read_operations" --argjson secondary_write_operations "$secondary_write_operations" \
+ \
+'def roles:
+  [
+    {role: "os", valid: $os_valid, capacity: (if $os_valid == 1 then $os_capacity else null end), used: (if $os_valid == 1 then $os_used else null end), available: (if $os_valid == 1 then $os_available else null end), read_bytes: (if $os_valid == 1 then $os_read_bytes else null end), write_bytes: (if $os_valid == 1 then $os_write_bytes else null end), read_operations: (if $os_valid == 1 then $os_read_operations else null end), write_operations: (if $os_valid == 1 then $os_write_operations else null end)},
+    {role: "nvr_primary", valid: $primary_valid, capacity: (if $primary_valid == 1 then $primary_capacity else null end), used: (if $primary_valid == 1 then $primary_used else null end), available: (if $primary_valid == 1 then $primary_available else null end), read_bytes: (if $primary_valid == 1 then $primary_read_bytes else null end), write_bytes: (if $primary_valid == 1 then $primary_write_bytes else null end), read_operations: (if $primary_valid == 1 then $primary_read_operations else null end), write_operations: (if $primary_valid == 1 then $primary_write_operations else null end)},
+    {role: "nvr_secondary", valid: $secondary_valid, capacity: (if $secondary_valid == 1 then $secondary_capacity else null end), used: (if $secondary_valid == 1 then $secondary_used else null end), available: (if $secondary_valid == 1 then $secondary_available else null end), read_bytes: (if $secondary_valid == 1 then $secondary_read_bytes else null end), write_bytes: (if $secondary_valid == 1 then $secondary_write_bytes else null end), read_operations: (if $secondary_valid == 1 then $secondary_read_operations else null end), write_operations: (if $secondary_valid == 1 then $secondary_write_operations else null end)}
+  ];
+def points($field):
+  roles | map(select(.[$field] != null) | {asInt: .[$field], timeUnixNano: $timestamp, attributes: [{key: "storage.role", value: {stringValue: .role}}]});
+[
+  {name: "homelab.storage.mount.valid", field: "valid"},
+  {name: "homelab.filesystem.capacity.bytes", field: "capacity"},
+  {name: "homelab.filesystem.used.bytes", field: "used"},
+  {name: "homelab.filesystem.available.bytes", field: "available"},
+  {name: "homelab.disk.read.bytes", field: "read_bytes"},
+  {name: "homelab.disk.write.bytes", field: "write_bytes"},
+  {name: "homelab.disk.read.operations", field: "read_operations"},
+  {name: "homelab.disk.write.operations", field: "write_operations"}
+] | map({name: .name, gauge: {dataPoints: points(.field)}})
+'
+) || exit 1
+
+payload_file=/tmp/observability-host-storage.$$.json
+umask 077
+trap 'rm -f "$payload_file"' EXIT HUP INT TERM
+$jq -cn --argjson metrics "$metrics" '
+  {resourceMetrics: [{resource: {attributes: [
+    {key: "host.name", value: {stringValue: "scrypted-nvr"}},
+    {key: "telemetry.synthetic", value: {boolValue: false}}
+  ]}, scopeMetrics: [{metrics: $metrics}]}]}
+' >"$payload_file" 2>/dev/null || exit 1
+
+$curl --fail --silent --output /dev/null --connect-timeout 3 --max-time 8 \
+	--header 'Content-Type: application/json' --data-binary "@$payload_file" \
+	http://127.0.0.1:4318/v1/metrics >/dev/null 2>&1 || exit 1

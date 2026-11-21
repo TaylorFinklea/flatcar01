@@ -1,0 +1,64 @@
+{
+	admin off
+	auto_https disable_redirects
+	servers 10.10.10.50:443 {
+		protocols h1 h2
+	}
+}
+
+observe.example.com:443 {
+	bind 10.10.10.50
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+		resolvers 1.1.1.1
+	}
+
+	request_body {
+		max_size 4MiB
+	}
+
+	@homelab {
+		path /otlp/homelab/*
+		header Authorization "Bearer {env.HOMELAB_OTLP_TOKEN}"
+	}
+	@ai {
+		path /otlp/ai/*
+		header Authorization "Bearer {env.AI_OTLP_TOKEN}"
+	}
+	@homelab_path {
+		path /otlp/homelab/*
+	}
+	@ai_path {
+		path /otlp/ai/*
+	}
+	@otlp_path {
+		path /otlp/*
+	}
+
+	route {
+		handle @homelab {
+			uri strip_prefix /otlp/homelab
+			reverse_proxy 127.0.0.1:4318 {
+				header_up -Authorization
+			}
+		}
+		handle @ai {
+			uri strip_prefix /otlp/ai
+			reverse_proxy 127.0.0.1:4319 {
+				header_up -Authorization
+			}
+		}
+		handle @homelab_path {
+			respond "Unauthorized" 401
+		}
+		handle @ai_path {
+			respond "Unauthorized" 401
+		}
+		handle @otlp_path {
+			respond "Not Found" 404
+		}
+		handle {
+			reverse_proxy 127.0.0.1:5080
+		}
+	}
+}

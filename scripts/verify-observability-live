@@ -1,0 +1,129 @@
+#!/bin/sh
+# Produces and consumes a strict, value-free target receipt.
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
+. "$script_dir/observability-operation-lib"
+
+usage() { echo "usage: $0 {preflight|postflight} <ssh-target> <preflight-receipt>" >&2; exit 2; }
+fail() { echo "$1" >&2; exit 1; }
+
+remote() {
+	command=$1
+	shift
+	if [ -n "${OBSERVABILITY_REMOTE_ROOT:-}" ]; then
+		OBSERVABILITY_REMOTE_LIB="$script_dir/observability-operation-lib" OBSERVABILITY_REMOTE_ROOT="$OBSERVABILITY_REMOTE_ROOT" "$script_dir/observability-remote" "$command" "$@"
+		return
+	fi
+	{ cat "$script_dir/observability-operation-lib"; cat "$script_dir/observability-remote"; } | ssh -o BatchMode=yes "$target" "sudo install -d -m 0700 /run/observability-operation && sudo install -m 0700 /dev/stdin /run/observability-operation/runner"
+	ssh -o BatchMode=yes "$target" "sudo /run/observability-operation/runner $command $*"
+}
+
+write_receipt() {
+	dir=$(dirname "$receipt")
+	base=$(basename "$receipt")
+	[ -d "$dir" ] && [ ! -L "$receipt" ] || fail 'unsafe receipt path'
+	umask 077
+	tmp=$(mktemp "$dir/.${base}.XXXXXX") || fail 'cannot create receipt'
+	trap 'rm -f "$tmp"' EXIT HUP INT TERM
+	printf 'format=observability-preflight-v3\ntarget=%s\nsource_digest=%s\nbaseline=%s\npreflight_digest=%s\nrecording_nvr=%s\nrecording_nvr2=%s\norigin=%s\ncertificate_name=%s\n' "$target" "$source" "$baseline" "$preflight_digest" "$recording_nvr" "$recording_nvr2" "$(ops_origin)" "$(ops_certificate_name)" > "$tmp"
+	chmod 0600 "$tmp"
+	mv -f "$tmp" "$receipt"
+	trap - EXIT HUP INT TERM
+}
+
+parse_preflight() {
+	report=$1
+	[ "$(wc -l < "$report" | tr -d ' ')" = 6 ] || return 1
+	awk -F '=' '
+	BEGIN { split("baseline preflight_digest recording_nvr recording_nvr2 origin certificate_name", want, " "); for (i in want) allowed[want[i]]=1 }
+	NF != 2 || !($1 in allowed) || seen[$1]++ { exit 1 }
+	END { for (i in allowed) if (!seen[i]) exit 1 }
+	' "$report" || return 1
+	baseline=$(sed -n 's/^baseline=//p' "$report")
+	preflight_digest=$(sed -n 's/^preflight_digest=//p' "$report")
+	recording_nvr=$(sed -n 's/^recording_nvr=//p' "$report")
+	recording_nvr2=$(sed -n 's/^recording_nvr2=//p' "$report")
+	[ "$(sed -n 's/^origin=//p' "$report")" = "$(ops_origin)" ] || return 1
+	[ "$(sed -n 's/^certificate_name=//p' "$report")" = "$(ops_certificate_name)" ] || return 1
+	ops_hex64 "$baseline" && ops_hex64 "$preflight_digest" || return 1
+	case "$recording_nvr" in ''|*[!0-9]*) return 1;; esac
+	case "$recording_nvr2" in ''|*[!0-9]*) return 1;; esac
+}
+
+parse_postflight() {
+	report=$1
+	[ "$(wc -l < "$report" | tr -d ' ')" = 22 ] || return 1
+	awk -F '=' '
+	BEGIN { split("schema source_digest baseline_match scrypted_pid_start_restart_match mount_identity_rw_match recording_progress_nonregression kernel_warning_delta capacity_memory_prerequisites dns_prerequisite architecture_prerequisite openobserve_health unit_count container_count container_caps listener_count listener_addresses queue_bytes collector_metric_count collector_metric_names collector_attribute_names certificate_name certificate_expiry_days", want, " "); for (i in want) allowed[want[i]]=1 }
+	NF != 2 || !($1 in allowed) || seen[$1]++ { exit 1 }
+	END { for (i in allowed) if (!seen[i]) exit 1 }
+	' "$report" || return 1
+	grep -Fx 'schema=observability-postflight-v1' "$report" >/dev/null || return 1
+	grep -Fqx "source_digest=$OPS_RECEIPT_SOURCE" "$report" >/dev/null || return 1
+	grep -Fx 'baseline_match=1' "$report" >/dev/null || return 1
+	grep -Fx 'scrypted_pid_start_restart_match=1' "$report" >/dev/null || return 1
+	grep -Fx 'mount_identity_rw_match=1' "$report" >/dev/null || return 1
+	grep -Fx 'recording_progress_nonregression=1' "$report" >/dev/null || return 1
+	grep -Fx 'kernel_warning_delta=0' "$report" >/dev/null || return 1
+	grep -Fx 'capacity_memory_prerequisites=1' "$report" >/dev/null || return 1
+	grep -Fx 'dns_prerequisite=1' "$report" >/dev/null || return 1
+	grep -Fx 'architecture_prerequisite=1' "$report" >/dev/null || return 1
+	grep -Fx 'openobserve_health=ok' "$report" >/dev/null || return 1
+	grep -Fx 'unit_count=4' "$report" >/dev/null || return 1
+	grep -Fx 'container_count=4' "$report" >/dev/null || return 1
+	grep -Fx 'container_caps=openobserve:3221225472:2000000000,otel-collector:536870912:1000000000,otel-docker-agent:402653184:500000000,observe-proxy:268435456:500000000' "$report" >/dev/null || return 1
+	grep -Fx 'listener_count=7' "$report" >/dev/null || return 1
+	grep -Fx 'listener_addresses=10.10.10.50:443,127.0.0.1:4318,127.0.0.1:4319,127.0.0.1:4320,127.0.0.1:5080,127.0.0.1:5081,127.0.0.1:8888' "$report" >/dev/null || return 1
+	queue_bytes=$(sed -n 's/^queue_bytes=//p' "$report")
+	case "$queue_bytes" in ''|*[!0-9]*) return 1;; esac
+	[ "$queue_bytes" -le 268435456 ] || return 1
+	grep -Eq '^collector_metric_count=[0-9]{1,3}$' "$report" || return 1
+	for bounded_key in collector_metric_names collector_attribute_names; do
+		bounded_value=$(sed -n "s/^$bounded_key=//p" "$report")
+		[ -n "$bounded_value" ] && [ "$(printf '%s' "$bounded_value" | wc -c | tr -d ' ')" -le 512 ] || return 1
+		case "$bounded_value" in *[!A-Za-z0-9_.:,-]*) return 1;; esac
+	done
+	grep -Fqx "certificate_name=$(ops_certificate_name)" "$report" >/dev/null || return 1
+	grep -Eq '^certificate_expiry_days=[0-9]{1,5}$' "$report"
+}
+
+[ "$#" -eq 3 ] || usage
+mode=$1
+requested_target=$2
+target=$requested_target
+receipt=$3
+ops_target "$target" || fail 'invalid SSH target'
+
+case "$mode" in
+	preflight)
+		manifest=$(mktemp "${TMPDIR:-/tmp}/observability-source.XXXXXX") || fail 'cannot inspect source'
+		trap 'rm -f "$manifest"' EXIT HUP INT TERM
+		ops_manifest "$repo_dir" > "$manifest" || fail 'invalid canonical artifact map'
+		source=$(ops_manifest_digest "$manifest")
+		result=$(remote preflight) || fail 'preflight failed'
+		preflight_report=$(mktemp "${TMPDIR:-/tmp}/observability-preflight.XXXXXX") || fail 'cannot parse preflight report'
+		trap 'rm -f "$manifest" "$preflight_report"' EXIT HUP INT TERM
+		printf '%s\n' "$result" > "$preflight_report"
+		parse_preflight "$preflight_report" || fail 'invalid preflight report'
+		ops_hex64 "$source" || fail 'invalid source digest'
+		write_receipt
+		echo 'preflight: receipt written'
+		;;
+	postflight)
+		ops_receipt "$receipt" || fail 'invalid preflight receipt'
+		[ "$OPS_RECEIPT_TARGET" = "$requested_target" ] || fail 'receipt target mismatch'
+		target=$requested_target
+		manifest=$(mktemp "${TMPDIR:-/tmp}/observability-source.XXXXXX") || fail 'cannot inspect source'
+		trap 'rm -f "$manifest"' EXIT HUP INT TERM
+		ops_manifest "$repo_dir" > "$manifest" || fail 'invalid canonical artifact map'
+		[ "$(ops_manifest_digest "$manifest")" = "$OPS_RECEIPT_SOURCE" ] || fail 'receipt source mismatch'
+		report=$(mktemp "${TMPDIR:-/tmp}/observability-postflight.XXXXXX") || fail 'cannot create report parser input'
+		trap 'rm -f "$manifest" "$report"' EXIT HUP INT TERM
+		remote postflight "$OPS_RECEIPT_SOURCE" "$OPS_RECEIPT_BASELINE" "$OPS_RECEIPT_PREFLIGHT" > "$report" || fail 'postflight failed'
+		parse_postflight "$report" || fail 'invalid postflight report'
+		echo 'postflight: bounded report verified'
+		;;
+	*) usage ;;
+esac

@@ -1,0 +1,62 @@
+{
+  "canaries": [
+    "CANARY_AT_PROMPT",
+    "CANARY_AT_RESPONSE",
+    "CANARY_AT_COMMAND",
+    "CANARY_AT_PATH",
+    "CANARY_AT_URL",
+    "CANARY_AT_HEADER",
+    "CANARY_AT_BODY",
+    "CANARY_AT_SECRET",
+    "CANARY_AT_EVENT",
+    "CANARY_AT_LINK",
+    "CANARY_AT_BAGGAGE"
+  ],
+  "input": {
+    "resource": {
+      "attributes": {
+        "host.name": "untrusted-host",
+        "prompt": "CANARY_AT_PROMPT",
+        "response": "CANARY_AT_RESPONSE",
+        "shell.command": "CANARY_AT_COMMAND",
+        "file.path": "CANARY_AT_PATH",
+        "url.full": "CANARY_AT_URL",
+        "http.request.header.authorization": "CANARY_AT_HEADER",
+        "http.request.body": "CANARY_AT_BODY",
+        "env.secret": "CANARY_AT_SECRET",
+        "baggage": "CANARY_AT_BAGGAGE",
+        "telemetry.synthetic": true
+      }
+    },
+    "spans": [
+      {
+        "name": "do not retain user span name",
+        "trace_state": "CANARY_AT_BAGGAGE",
+        "status_message": "CANARY_AT_RESPONSE",
+        "attributes": {"ai.tool": "codex", "ai.harness": "codex", "ai.role": "lead", "ai.provider": "openai", "ai.model": "gpt-5.6", "ai.lane": "local", "ai.operation": "run", "ai.status": "ok", "ai.error.class": "none", "ai.instrumentation.version": "v1", "ai.currency": "USD", "ai.run.id": "run_123", "ai.task.id": "task_456", "prompt": "CANARY_AT_PROMPT"},
+        "events": [{"name": "exception", "attributes": {"exception.message": "CANARY_AT_EVENT", "exception.stacktrace": "CANARY_AT_RESPONSE"}}],
+        "links": [{"attributes": {"link.payload": "CANARY_AT_LINK"}}]
+      },
+      {
+        "name": "unknown operation",
+        "attributes": {"ai.operation": "custom", "user.text": "CANARY_AT_BODY"}
+      }
+    ]
+  },
+  "expected": {
+    "records": [
+      {
+        "name": "ai.run",
+        "resource": {"host.name": "scrypted-nvr", "telemetry.synthetic": true},
+        "attributes": {"ai.tool": "codex", "ai.harness": "codex", "ai.role": "lead", "ai.provider": "openai", "ai.model": "gpt-5.6", "ai.lane": "local", "ai.operation": "run", "ai.status": "ok", "ai.error.class": "none", "ai.instrumentation.version": "v1", "ai.currency": "USD", "ai.run.id": "run_123", "ai.task.id": "task_456"},
+        "events": [],
+        "links": [],
+        "trace_state": "",
+        "status_message": ""
+      }
+    ],
+    "dropped_records": [
+      "unknown operation"
+    ]
+  }
+}

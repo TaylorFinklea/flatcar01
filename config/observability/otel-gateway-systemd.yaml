@@ -1,0 +1,452 @@
+extensions:
+  file_storage/host_metrics:
+    directory: /var/lib/otelcol/queue/host_metrics
+    create_directory: true
+    directory_permissions: "0750"
+    max_size: 50331648
+  file_storage/homelab_metrics:
+    directory: /var/lib/otelcol/queue/homelab_metrics
+    create_directory: true
+    directory_permissions: "0750"
+    max_size: 33554432
+  file_storage/docker_metrics:
+    directory: /var/lib/otelcol/queue/docker_metrics
+    create_directory: true
+    directory_permissions: "0750"
+    max_size: 41943040
+  file_storage/ai_metrics:
+    directory: /var/lib/otelcol/queue/ai_metrics
+    create_directory: true
+    directory_permissions: "0750"
+    max_size: 33554432
+  file_storage/ai_traces:
+    directory: /var/lib/otelcol/queue/ai_traces
+    create_directory: true
+    directory_permissions: "0750"
+    max_size: 41943040
+receivers:
+  otlp/homelab:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4318
+  otlp/ai:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4319
+  otlp/docker:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4320
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:
+        metrics:
+          system.cpu.logical.count:
+            enabled: true
+          system.cpu.time:
+            enabled: true
+          system.cpu.utilization:
+            enabled: true
+      load:
+        metrics:
+          system.cpu.load_average.1m:
+            enabled: true
+          system.cpu.load_average.5m:
+            enabled: true
+          system.cpu.load_average.15m:
+            enabled: true
+      memory:
+        metrics:
+          system.memory.usage:
+            enabled: true
+      network:
+        metrics:
+          system.network.io:
+            enabled: true
+  prometheus/self:
+    config:
+      scrape_configs:
+        - job_name: otel-collector
+          scrape_interval: 30s
+          static_configs:
+            - targets: ["127.0.0.1:8888"]
+  systemd:
+    collection_interval: 30s
+    scope: system
+    units: [openobserve.service, observe-proxy.service, otel-collector.service, otel-docker-agent.service]
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 384
+    spike_limit_mib: 64
+  transform/mark_resource_rebuild:
+    error_mode: propagate
+    metric_statements:
+      - context: datapoint
+        statements:
+          - set(datapoint.attributes["telemetry.private.resource.rebuild"], true)
+    trace_statements:
+      - context: span
+        statements:
+          - set(span.attributes["telemetry.private.resource.rebuild"], true)
+  groupbyattrs/rebuild_resource:
+    keys: [telemetry.private.resource.rebuild]
+  filter/drop_unapproved_host_metrics:
+    error_mode: propagate
+    metric_conditions:
+      - metric.name != "system.cpu.logical.count" and metric.name != "system.cpu.time" and metric.name != "system.cpu.utilization" and metric.name != "system.cpu.load_average.1m" and metric.name != "system.cpu.load_average.5m" and metric.name != "system.cpu.load_average.15m" and metric.name != "system.memory.usage" and metric.name != "system.network.io" and metric.name != "systemd.unit.state"
+      - metric.name == "system.network.io" and datapoint.attributes["device"] != "enp0s31f6"
+      - (metric.name == "system.cpu.time" or metric.name == "system.cpu.utilization") and IsMatch(datapoint.attributes["state"], "^(idle|user|system|nice|iowait|irq|softirq|steal|guest|guest_nice)$") == false
+      - metric.name == "system.memory.usage" and IsMatch(datapoint.attributes["state"], "^(used|free|cached|buffers)$") == false
+      - metric.name == "system.network.io" and datapoint.attributes["direction"] != "receive" and datapoint.attributes["direction"] != "transmit"
+      - metric.name == "systemd.unit.state" and resource.attributes["systemd.unit.name"] != "openobserve.service" and resource.attributes["systemd.unit.name"] != "observe-proxy.service" and resource.attributes["systemd.unit.name"] != "otel-collector.service" and resource.attributes["systemd.unit.name"] != "otel-docker-agent.service"
+      - metric.name == "systemd.unit.state" and IsMatch(datapoint.attributes["state"], "^(active|activating|deactivating|inactive|failed)$") == false
+      - resource.attributes["telemetry.synthetic"] != nil and IsBool(resource.attributes["telemetry.synthetic"]) == false
+  filter/drop_unapproved_homelab_metrics:
+    error_mode: propagate
+    metric_conditions:
+      - metric.name != "system.cpu.logical.count" and metric.name != "system.cpu.time" and metric.name != "system.cpu.utilization" and metric.name != "system.cpu.load_average.1m" and metric.name != "system.cpu.load_average.5m" and metric.name != "system.cpu.load_average.15m" and metric.name != "system.memory.usage" and metric.name != "system.network.io" and metric.name != "homelab.storage.mount.valid" and metric.name != "homelab.filesystem.capacity.bytes" and metric.name != "homelab.filesystem.used.bytes" and metric.name != "homelab.filesystem.available.bytes" and metric.name != "homelab.disk.read.bytes" and metric.name != "homelab.disk.write.bytes" and metric.name != "homelab.disk.read.operations" and metric.name != "homelab.disk.write.operations"
+      - metric.name == "system.network.io" and datapoint.attributes["device"] != "enp0s31f6"
+      - (metric.name == "system.cpu.time" or metric.name == "system.cpu.utilization") and IsMatch(datapoint.attributes["state"], "^(idle|user|system|nice|iowait|irq|softirq|steal|guest|guest_nice)$") == false
+      - metric.name == "system.memory.usage" and IsMatch(datapoint.attributes["state"], "^(used|free|cached|buffers)$") == false
+      - metric.name == "system.network.io" and datapoint.attributes["direction"] != "receive" and datapoint.attributes["direction"] != "transmit"
+      - (metric.name == "homelab.storage.mount.valid" or metric.name == "homelab.filesystem.capacity.bytes" or metric.name == "homelab.filesystem.used.bytes" or metric.name == "homelab.filesystem.available.bytes" or metric.name == "homelab.disk.read.bytes" or metric.name == "homelab.disk.write.bytes" or metric.name == "homelab.disk.read.operations" or metric.name == "homelab.disk.write.operations") and datapoint.attributes["storage.role"] != "os" and datapoint.attributes["storage.role"] != "nvr_primary" and datapoint.attributes["storage.role"] != "nvr_secondary"
+      - metric.name != "homelab.storage.mount.valid" and metric.name != "homelab.filesystem.capacity.bytes" and metric.name != "homelab.filesystem.used.bytes" and metric.name != "homelab.filesystem.available.bytes" and metric.name != "homelab.disk.read.bytes" and metric.name != "homelab.disk.write.bytes" and metric.name != "homelab.disk.read.operations" and metric.name != "homelab.disk.write.operations" and datapoint.attributes["storage.role"] != nil
+      - resource.attributes["telemetry.synthetic"] != nil and IsBool(resource.attributes["telemetry.synthetic"]) == false
+  filter/drop_unapproved_docker_metrics:
+    error_mode: propagate
+    metric_conditions:
+      - metric.name != "container.cpu.usage.total" and metric.name != "container.cpu.utilization" and metric.name != "container.memory.usage.total" and metric.name != "container.memory.usage.limit" and metric.name != "container.network.io.usage.rx_bytes" and metric.name != "container.network.io.usage.tx_bytes" and metric.name != "container.blockio.io_service_bytes_recursive"
+      - resource.attributes["container.name"] != "scrypted" and resource.attributes["container.name"] != "scrypted-watchtower" and resource.attributes["container.name"] != "openobserve" and resource.attributes["container.name"] != "observe-proxy" and resource.attributes["container.name"] != "otel-collector" and resource.attributes["container.name"] != "otel-docker-agent"
+      - metric.name == "container.blockio.io_service_bytes_recursive" and datapoint.attributes["operation"] != "read" and datapoint.attributes["operation"] != "write"
+      - resource.attributes["telemetry.synthetic"] != nil and IsBool(resource.attributes["telemetry.synthetic"]) == false
+  filter/drop_unapproved_ai_metrics:
+    error_mode: propagate
+    metric_conditions:
+      - metric.name != "ai.run.count" and metric.name != "ai.run.duration" and metric.name != "ai.tokens.input" and metric.name != "ai.tokens.output" and metric.name != "ai.cost"
+      - resource.attributes["telemetry.synthetic"] != nil and IsBool(resource.attributes["telemetry.synthetic"]) == false
+      - datapoint.attributes["ai.tool"] != nil and IsMatch(datapoint.attributes["ai.tool"], "^[A-Za-z0-9._-]{1,64}$") == false
+      - datapoint.attributes["ai.harness"] != nil and IsMatch(datapoint.attributes["ai.harness"], "^[A-Za-z0-9._-]{1,64}$") == false
+      - datapoint.attributes["ai.role"] != nil and IsMatch(datapoint.attributes["ai.role"], "^[A-Za-z0-9._-]{1,64}$") == false
+      - datapoint.attributes["ai.provider"] != nil and IsMatch(datapoint.attributes["ai.provider"], "^[A-Za-z0-9._-]{1,64}$") == false
+      - datapoint.attributes["ai.model"] != nil and IsMatch(datapoint.attributes["ai.model"], "^[A-Za-z0-9._-]{1,128}$") == false
+      - datapoint.attributes["ai.lane"] != nil and IsMatch(datapoint.attributes["ai.lane"], "^[A-Za-z0-9._-]{1,64}$") == false
+      - datapoint.attributes["ai.operation"] != nil and IsMatch(datapoint.attributes["ai.operation"], "^(run|tool|inference)$") == false
+      - datapoint.attributes["ai.status"] != nil and IsMatch(datapoint.attributes["ai.status"], "^(ok|error|cancelled)$") == false
+      - datapoint.attributes["ai.error.class"] != nil and IsMatch(datapoint.attributes["ai.error.class"], "^[A-Za-z0-9._-]{1,64}$") == false
+      - datapoint.attributes["ai.instrumentation.version"] != nil and IsMatch(datapoint.attributes["ai.instrumentation.version"], "^[A-Za-z0-9._-]{1,64}$") == false
+      - datapoint.attributes["ai.currency"] != nil and IsMatch(datapoint.attributes["ai.currency"], "^[A-Z]{3}$") == false
+      - datapoint.attributes["ai.run.id"] != nil and IsMatch(datapoint.attributes["ai.run.id"], "^[A-Za-z0-9._-]{1,128}$") == false
+      - datapoint.attributes["ai.task.id"] != nil and IsMatch(datapoint.attributes["ai.task.id"], "^[A-Za-z0-9._-]{1,128}$") == false
+  filter/drop_unapproved_self_metrics:
+    error_mode: propagate
+    metric_conditions:
+      - metric.name != "otelcol_receiver_accepted_metric_points" and metric.name != "otelcol_receiver_refused_metric_points" and metric.name != "otelcol_exporter_sent_metric_points" and metric.name != "otelcol_exporter_send_failed_metric_points" and metric.name != "otelcol_exporter_enqueue_failed_metric_points" and metric.name != "otelcol_exporter_queue_size" and metric.name != "otelcol_exporter_queue_capacity"
+  filter/drop_unapproved_ai_traces:
+    error_mode: propagate
+    trace_conditions:
+      - span.attributes["ai.operation"] != "run" and span.attributes["ai.operation"] != "tool" and span.attributes["ai.operation"] != "inference"
+      - resource.attributes["telemetry.synthetic"] != nil and IsBool(resource.attributes["telemetry.synthetic"]) == false
+      - span.attributes["ai.tool"] != nil and IsMatch(span.attributes["ai.tool"], "^[A-Za-z0-9._-]{1,64}$") == false
+      - span.attributes["ai.harness"] != nil and IsMatch(span.attributes["ai.harness"], "^[A-Za-z0-9._-]{1,64}$") == false
+      - span.attributes["ai.role"] != nil and IsMatch(span.attributes["ai.role"], "^[A-Za-z0-9._-]{1,64}$") == false
+      - span.attributes["ai.provider"] != nil and IsMatch(span.attributes["ai.provider"], "^[A-Za-z0-9._-]{1,64}$") == false
+      - span.attributes["ai.model"] != nil and IsMatch(span.attributes["ai.model"], "^[A-Za-z0-9._-]{1,128}$") == false
+      - span.attributes["ai.lane"] != nil and IsMatch(span.attributes["ai.lane"], "^[A-Za-z0-9._-]{1,64}$") == false
+      - span.attributes["ai.operation"] != nil and IsMatch(span.attributes["ai.operation"], "^(run|tool|inference)$") == false
+      - span.attributes["ai.status"] != nil and IsMatch(span.attributes["ai.status"], "^(ok|error|cancelled)$") == false
+      - span.attributes["ai.error.class"] != nil and IsMatch(span.attributes["ai.error.class"], "^[A-Za-z0-9._-]{1,64}$") == false
+      - span.attributes["ai.instrumentation.version"] != nil and IsMatch(span.attributes["ai.instrumentation.version"], "^[A-Za-z0-9._-]{1,64}$") == false
+      - span.attributes["ai.currency"] != nil and IsMatch(span.attributes["ai.currency"], "^[A-Z]{3}$") == false
+      - span.attributes["ai.run.id"] != nil and IsMatch(span.attributes["ai.run.id"], "^[A-Za-z0-9._-]{1,128}$") == false
+      - span.attributes["ai.task.id"] != nil and IsMatch(span.attributes["ai.task.id"], "^[A-Za-z0-9._-]{1,128}$") == false
+  transform/normalize_host_metrics:
+    error_mode: propagate
+    metric_statements:
+      - context: resource
+        statements:
+          - set(resource.schema_url, "")
+          - set(resource.dropped_attributes_count, 0)
+          - set(resource.attributes["host.name"], "scrypted-nvr")
+          - set(resource.attributes["telemetry.synthetic"], false) where resource.attributes["telemetry.synthetic"] == nil
+          - keep_keys(resource.attributes, ["host.name", "systemd.unit.name", "telemetry.synthetic"])
+      - context: scope
+        statements:
+          - set(scope.name, "")
+          - set(scope.version, "")
+          - set(scope.schema_url, "")
+          - set(scope.dropped_attributes_count, 0)
+          - delete_matching_keys(scope.attributes, ".*")
+      - context: metric
+        statements:
+          - set(metric.description, "")
+          - set(metric.unit, "")
+          - delete_matching_keys(metric.metadata, ".*")
+      - context: datapoint
+        statements:
+          - set(datapoint.flags, 0)
+          - set(datapoint.exemplars, nil)
+          - set(datapoint.attributes["network.interface"], "lan") where metric.name == "system.network.io" and datapoint.attributes["device"] == "enp0s31f6"
+          - set(datapoint.attributes["network.direction"], datapoint.attributes["direction"]) where metric.name == "system.network.io"
+          - keep_keys(datapoint.attributes, ["state", "network.interface", "network.direction"])
+  transform/normalize_homelab_metrics:
+    error_mode: propagate
+    metric_statements:
+      - context: resource
+        statements:
+          - set(resource.schema_url, "")
+          - set(resource.dropped_attributes_count, 0)
+          - set(resource.attributes["host.name"], "scrypted-nvr")
+          - set(resource.attributes["telemetry.synthetic"], false) where resource.attributes["telemetry.synthetic"] == nil
+          - keep_keys(resource.attributes, ["host.name", "telemetry.synthetic"])
+      - context: scope
+        statements:
+          - set(scope.name, "")
+          - set(scope.version, "")
+          - set(scope.schema_url, "")
+          - set(scope.dropped_attributes_count, 0)
+          - delete_matching_keys(scope.attributes, ".*")
+      - context: metric
+        statements:
+          - set(metric.description, "")
+          - set(metric.unit, "")
+          - delete_matching_keys(metric.metadata, ".*")
+      - context: datapoint
+        statements:
+          - set(datapoint.flags, 0)
+          - set(datapoint.exemplars, nil)
+          - set(datapoint.attributes["network.interface"], "lan") where metric.name == "system.network.io" and datapoint.attributes["device"] == "enp0s31f6"
+          - set(datapoint.attributes["network.direction"], datapoint.attributes["direction"]) where metric.name == "system.network.io"
+          - keep_keys(datapoint.attributes, ["storage.role"]) where metric.name == "homelab.storage.mount.valid" or metric.name == "homelab.filesystem.capacity.bytes" or metric.name == "homelab.filesystem.used.bytes" or metric.name == "homelab.filesystem.available.bytes" or metric.name == "homelab.disk.read.bytes" or metric.name == "homelab.disk.write.bytes" or metric.name == "homelab.disk.read.operations" or metric.name == "homelab.disk.write.operations"
+          - keep_keys(datapoint.attributes, ["state", "network.interface", "network.direction"]) where not (metric.name == "homelab.storage.mount.valid" or metric.name == "homelab.filesystem.capacity.bytes" or metric.name == "homelab.filesystem.used.bytes" or metric.name == "homelab.filesystem.available.bytes" or metric.name == "homelab.disk.read.bytes" or metric.name == "homelab.disk.write.bytes" or metric.name == "homelab.disk.read.operations" or metric.name == "homelab.disk.write.operations")
+  transform/normalize_docker_metrics:
+    error_mode: propagate
+    metric_statements:
+      - context: resource
+        statements:
+          - set(resource.schema_url, "")
+          - set(resource.dropped_attributes_count, 0)
+          - set(resource.attributes["host.name"], "scrypted-nvr")
+          - set(resource.attributes["telemetry.synthetic"], false) where resource.attributes["telemetry.synthetic"] == nil
+          - keep_keys(resource.attributes, ["host.name", "container.name", "telemetry.synthetic"])
+      - context: scope
+        statements:
+          - set(scope.name, "")
+          - set(scope.version, "")
+          - set(scope.schema_url, "")
+          - set(scope.dropped_attributes_count, 0)
+          - delete_matching_keys(scope.attributes, ".*")
+      - context: metric
+        statements:
+          - set(metric.description, "")
+          - set(metric.unit, "")
+          - delete_matching_keys(metric.metadata, ".*")
+      - context: datapoint
+        statements:
+          - set(datapoint.flags, 0)
+          - set(datapoint.exemplars, nil)
+          - keep_keys(datapoint.attributes, ["operation"])
+  transform/normalize_ai_metrics:
+    error_mode: propagate
+    metric_statements:
+      - context: resource
+        statements:
+          - set(resource.schema_url, "")
+          - set(resource.dropped_attributes_count, 0)
+          - set(resource.attributes["host.name"], "scrypted-nvr")
+          - set(resource.attributes["telemetry.synthetic"], false) where resource.attributes["telemetry.synthetic"] == nil
+          - keep_keys(resource.attributes, ["host.name", "telemetry.synthetic"])
+      - context: scope
+        statements:
+          - set(scope.name, "")
+          - set(scope.version, "")
+          - set(scope.schema_url, "")
+          - set(scope.dropped_attributes_count, 0)
+          - delete_matching_keys(scope.attributes, ".*")
+      - context: metric
+        statements:
+          - set(metric.description, "")
+          - set(metric.unit, "")
+          - delete_matching_keys(metric.metadata, ".*")
+      - context: datapoint
+        statements:
+          - set(datapoint.flags, 0)
+          - set(datapoint.exemplars, nil)
+          - keep_keys(datapoint.attributes, ["ai.tool", "ai.harness", "ai.role", "ai.provider", "ai.model", "ai.lane", "ai.operation", "ai.status", "ai.error.class", "ai.instrumentation.version", "ai.currency", "ai.run.id", "ai.task.id"])
+  transform/normalize_self_metrics:
+    error_mode: propagate
+    metric_statements:
+      - context: resource
+        statements:
+          - set(resource.schema_url, "")
+          - set(resource.dropped_attributes_count, 0)
+          - set(resource.attributes["host.name"], "scrypted-nvr")
+          - set(resource.attributes["telemetry.synthetic"], false)
+          - keep_keys(resource.attributes, ["host.name", "telemetry.synthetic"])
+      - context: scope
+        statements:
+          - set(scope.name, "")
+          - set(scope.version, "")
+          - set(scope.schema_url, "")
+          - set(scope.dropped_attributes_count, 0)
+          - delete_matching_keys(scope.attributes, ".*")
+      - context: metric
+        statements:
+          - set(metric.description, "")
+          - set(metric.unit, "")
+          - delete_matching_keys(metric.metadata, ".*")
+      - context: datapoint
+        statements:
+          - set(datapoint.flags, 0)
+          - set(datapoint.exemplars, nil)
+          - delete_matching_keys(datapoint.attributes, ".*")
+  transform/normalize_ai_traces:
+    error_mode: propagate
+    trace_statements:
+      - context: resource
+        statements:
+          - set(resource.schema_url, "")
+          - set(resource.dropped_attributes_count, 0)
+          - set(resource.attributes["host.name"], "scrypted-nvr")
+          - set(resource.attributes["telemetry.synthetic"], false) where resource.attributes["telemetry.synthetic"] == nil
+          - keep_keys(resource.attributes, ["host.name", "telemetry.synthetic"])
+      - context: scope
+        statements:
+          - set(scope.name, "")
+          - set(scope.version, "")
+          - set(scope.schema_url, "")
+          - set(scope.dropped_attributes_count, 0)
+          - delete_matching_keys(scope.attributes, ".*")
+      - context: span
+        statements:
+          - set(span.name, "ai.other")
+          - set(span.name, "ai.run") where span.attributes["ai.operation"] == "run"
+          - set(span.name, "ai.tool") where span.attributes["ai.operation"] == "tool"
+          - set(span.name, "ai.inference") where span.attributes["ai.operation"] == "inference"
+          - set(span.events, nil)
+          - set(span.links, nil)
+          - set(span.trace_state, "")
+          - set(span.kind, 0)
+          - set(span.flags, 0)
+          - set(span.dropped_attributes_count, 0)
+          - set(span.dropped_events_count, 0)
+          - set(span.dropped_links_count, 0)
+          - set(span.status.code, 0)
+          - set(span.status.message, "")
+          - keep_keys(span.attributes, ["ai.tool", "ai.harness", "ai.role", "ai.provider", "ai.model", "ai.lane", "ai.operation", "ai.status", "ai.error.class", "ai.instrumentation.version", "ai.currency", "ai.run.id", "ai.task.id"])
+  batch/metrics:
+    send_batch_size: 512
+    send_batch_max_size: 512
+    timeout: 5s
+  batch/traces:
+    send_batch_size: 128
+    send_batch_max_size: 128
+    timeout: 5s
+exporters:
+  otlp_http/host_metrics:
+    metrics_endpoint: http://127.0.0.1:5080/api/default/v1/metrics
+    headers:
+      Authorization: ${env:OPENOBSERVE_INGEST_AUTH_HEADER}
+    retry_on_failure:
+      max_elapsed_time: 0
+    sending_queue:
+      enabled: true
+      storage: file_storage/host_metrics
+      sizer: bytes
+      queue_size: 41943040
+      block_on_overflow: false
+  otlp_http/homelab_metrics:
+    metrics_endpoint: http://127.0.0.1:5080/api/default/v1/metrics
+    headers:
+      Authorization: ${env:OPENOBSERVE_INGEST_AUTH_HEADER}
+    retry_on_failure:
+      max_elapsed_time: 0
+    sending_queue:
+      enabled: true
+      storage: file_storage/homelab_metrics
+      sizer: bytes
+      queue_size: 25165824
+      block_on_overflow: false
+  otlp_http/docker_metrics:
+    metrics_endpoint: http://127.0.0.1:5080/api/default/v1/metrics
+    headers:
+      Authorization: ${env:OPENOBSERVE_INGEST_AUTH_HEADER}
+    retry_on_failure:
+      max_elapsed_time: 0
+    sending_queue:
+      enabled: true
+      storage: file_storage/docker_metrics
+      sizer: bytes
+      queue_size: 33554432
+      block_on_overflow: false
+  otlp_http/ai_metrics:
+    metrics_endpoint: http://127.0.0.1:5080/api/default/v1/metrics
+    headers:
+      Authorization: ${env:OPENOBSERVE_INGEST_AUTH_HEADER}
+    retry_on_failure:
+      max_elapsed_time: 0
+    sending_queue:
+      enabled: true
+      storage: file_storage/ai_metrics
+      sizer: bytes
+      queue_size: 25165824
+      block_on_overflow: false
+  otlp_http/ai_traces:
+    traces_endpoint: http://127.0.0.1:5080/api/default/v1/traces
+    headers:
+      Authorization: ${env:OPENOBSERVE_INGEST_AUTH_HEADER}
+    retry_on_failure:
+      max_elapsed_time: 0
+    sending_queue:
+      enabled: true
+      storage: file_storage/ai_traces
+      sizer: bytes
+      queue_size: 33554432
+      block_on_overflow: false
+service:
+  telemetry:
+    metrics:
+      level: detailed
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 127.0.0.1
+                port: 8888
+                without_scope_info: true
+                without_type_suffix: true
+                without_units: true
+                with_resource_constant_labels:
+                  included: []
+  extensions:
+    - file_storage/host_metrics
+    - file_storage/homelab_metrics
+    - file_storage/docker_metrics
+    - file_storage/ai_metrics
+    - file_storage/ai_traces
+  pipelines:
+    metrics/host:
+      receivers: [hostmetrics, systemd]
+      processors: [memory_limiter, filter/drop_unapproved_host_metrics, transform/mark_resource_rebuild, groupbyattrs/rebuild_resource, transform/normalize_host_metrics, batch/metrics]
+      exporters: [otlp_http/host_metrics]
+    metrics/homelab:
+      receivers: [otlp/homelab]
+      processors: [memory_limiter, filter/drop_unapproved_homelab_metrics, transform/mark_resource_rebuild, groupbyattrs/rebuild_resource, transform/normalize_homelab_metrics, batch/metrics]
+      exporters: [otlp_http/homelab_metrics]
+    metrics/docker:
+      receivers: [otlp/docker]
+      processors: [memory_limiter, filter/drop_unapproved_docker_metrics, transform/mark_resource_rebuild, groupbyattrs/rebuild_resource, transform/normalize_docker_metrics, batch/metrics]
+      exporters: [otlp_http/docker_metrics]
+    metrics/ai:
+      receivers: [otlp/ai]
+      processors: [memory_limiter, filter/drop_unapproved_ai_metrics, transform/mark_resource_rebuild, groupbyattrs/rebuild_resource, transform/normalize_ai_metrics, batch/metrics]
+      exporters: [otlp_http/ai_metrics]
+    metrics/self:
+      receivers: [prometheus/self]
+      processors: [memory_limiter, filter/drop_unapproved_self_metrics, transform/mark_resource_rebuild, groupbyattrs/rebuild_resource, transform/normalize_self_metrics, batch/metrics]
+      exporters: [otlp_http/host_metrics]
+    traces/ai:
+      receivers: [otlp/ai]
+      processors: [memory_limiter, filter/drop_unapproved_ai_traces, transform/mark_resource_rebuild, groupbyattrs/rebuild_resource, transform/normalize_ai_traces, batch/traces]
+      exporters: [otlp_http/ai_traces]

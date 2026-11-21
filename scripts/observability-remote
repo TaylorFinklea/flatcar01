@@ -1,0 +1,923 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if ! command -v ops_map >/dev/null 2>&1; then
+	. "${OBSERVABILITY_REMOTE_LIB:-$script_dir/observability-operation-lib}"
+fi
+
+fail() { echo "$1" >&2; exit 1; }
+root_path() { ops_remote_path "$1"; }
+state_root() { root_path /var/lib/observability/deploy-state; }
+OBS_MEMORY_CAPS_TOTAL=4429185024
+OBS_MEMORY_HOST_HEADROOM=1073741824
+OBS_MIN_MEMORY_AVAILABLE=$((OBS_MEMORY_CAPS_TOTAL + OBS_MEMORY_HOST_HEADROOM))
+OBS_MIN_OS_AVAILABLE=8858370048
+
+scrypted_snapshot() {
+	for unit in scrypted.service scrypted-watchtower.service; do
+		printf 'unit=%s\n' "$unit"
+		systemctl show --property=ActiveState --property=SubState --property=MainPID --property=ExecMainStartTimestamp "$unit"
+	done
+	docker inspect --format '{{.Id}} {{.State.Running}} {{.State.Pid}} {{.State.StartedAt}} {{.RestartCount}}' scrypted
+}
+
+scrypted_unit_healthy() {
+	unit=$1
+	properties=$(systemctl show --property=ActiveState --property=MainPID "$unit") || return 1
+	state=$(printf '%s\n' "$properties" | awk -F= '
+		$1 == "ActiveState" { if (++active_count != 1) exit 1; active=$2; next }
+		$1 == "MainPID" { if (++pid_count != 1) exit 1; pid=$2; next }
+		END { if (active_count != 1 || pid_count != 1) exit 1; print active "|" pid }
+	') || return 1
+	IFS='|' read -r active pid <<EOF
+$state
+EOF
+	[ "$active" = active ] || return 1
+	case "$pid" in ''|*[!0-9]*) return 1;; esac
+	[ "$pid" -gt 0 ]
+}
+
+scrypted_healthy() {
+	scrypted_unit_healthy scrypted.service || return 1
+	scrypted_unit_healthy scrypted-watchtower.service || return 1
+	container=$(docker inspect --format '{{.State.Running}} {{.State.Pid}}' scrypted) || return 1
+	set -- $container
+	[ "$#" -eq 2 ] && [ "$1" = true ] || return 1
+	case "$2" in ''|*[!0-9]*) return 1;; esac
+	[ "$2" -gt 0 ]
+}
+
+mount_snapshot() {
+	findmnt -n -o TARGET,SOURCE,OPTIONS --target "$(root_path /var/lib/scrypted/nvr)"
+	findmnt -n -o TARGET,SOURCE,OPTIONS --target "$(root_path /var/lib/scrypted/nvr2)"
+}
+
+kernel_snapshot() {
+	# The full matching set is stable for this transaction; do not use a
+	# sliding journal window whose ageing boundary changes by itself. The queue
+	# mount is an expected loop-backed EXT4 event created during bootstrap, so
+	# exclude only those routine loop lines while retaining storage warnings.
+	journalctl -k | grep -E 'EXT4-fs|I/O error|Buffer I/O' | grep -v -E 'EXT4-fs \(loop[0-9]+\)' || true
+}
+
+kernel_warning_delta() {
+	baseline=$1 current=$2
+	# Journal retention can age an old warning out between phases.  Treat a
+	# current snapshot as safe when every remaining warning was already present
+	# at baseline; only a newly observed warning is a protected-state delta.
+	[ -f "$baseline" ] && [ ! -L "$baseline" ] && [ -f "$current" ] && [ ! -L "$current" ] || return 1
+	[ ! -s "$current" ] && return 0
+	[ -s "$baseline" ] || return 1
+	while IFS= read -r warning; do
+		grep -Fqx "$warning" "$baseline" || return 1
+	done < "$current"
+}
+
+architecture_snapshot() { uname -m; }
+
+invariant() {
+	{ scrypted_snapshot; mount_snapshot; kernel_snapshot; architecture_snapshot; } | if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'; else shasum -a 256 | awk '{print $1}'; fi
+}
+
+mounts_healthy() {
+	for mount_source in \
+		'/var/lib/scrypted/nvr|/dev/disk/by-id/wwn-0x5000000000000001-part1' \
+		'/var/lib/scrypted/nvr2|/dev/disk/by-id/wwn-0x5000000000000002-part1'; do
+		IFS='|' read -r mount expected_source <<EOF
+$mount_source
+EOF
+		expected_target=$(root_path "$mount")
+		line=$(findmnt -n -o TARGET,SOURCE,OPTIONS --target "$expected_target") || return 1
+		set -- $line
+		[ "$#" -eq 3 ] || return 1
+		[ "$1" = "$mount" ] || return 1
+		case ",$3," in *,rw,*) : ;; *) return 1;; esac
+		actual_source=$(readlink -f "$2") || return 1
+		expected_canonical_source=$(readlink -f "$expected_source") || return 1
+		[ "$actual_source" = "$expected_canonical_source" ] || return 1
+	done
+}
+
+capacity_memory_healthy() {
+	available=$(df -B1 "$(root_path /)" | awk 'NR == 2 { print $4 }')
+	case "$available" in ''|*[!0-9]*) return 1;; esac
+	[ "$available" -ge "$OBS_MIN_OS_AVAILABLE" ] || return 1
+	memory=$(free -b | awk 'NR == 2 { print $7 }')
+	case "$memory" in ''|*[!0-9]*) return 1;; esac
+	[ "$memory" -ge "$OBS_MIN_MEMORY_AVAILABLE" ]
+}
+
+ports_free() {
+	ss -ltn | awk 'NR > 1 { address=$4; if (address ~ /:(443|4318|4319|4320|5080|5081|8888)$/) exit 1 }'
+}
+
+udp_443_free() {
+	ss -lun | awk 'NR > 1 { address=$4; if (address ~ /:443$/) exit 1 }'
+}
+
+dns_healthy() {
+	[ "$(getent ahostsv4 "$(ops_certificate_name)" | awk 'NR == 1 { print $1 }')" = 10.10.10.50 ] || return 1
+}
+
+architecture_healthy() { [ "$(uname -m)" = x86_64 ]; }
+
+require_static_prerequisites() {
+	mounts_healthy && capacity_memory_healthy && dns_healthy && architecture_healthy
+}
+
+require_preflight_prerequisites() {
+	require_static_prerequisites || return 1
+	ports_free && udp_443_free && scrypted_healthy
+}
+
+preflight_evidence() {
+	{
+		printf 'protected=%s\n' "$(invariant)"
+		mounts_healthy && printf 'mounts=exact-rw\n'
+		capacity_memory_healthy && printf 'capacity_memory=at-or-above-floor\n'
+		ports_free && printf 'ports=443-4318-4319-4320-5080-5081-8888-free\n'
+		udp_443_free && printf 'udp_443=free\n'
+		dns_healthy && printf 'dns=10.10.10.50\n'
+		architecture_healthy && printf 'architecture=x86_64\n'
+		scrypted_healthy && printf 'scrypted=active-nonzero-pids\n'
+	} | if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'; else shasum -a 256 | awk '{print $1}'; fi
+}
+
+recording_values() {
+	recordings=$1
+	recording_nvr=$(printf '%s\n' "$recordings" | awk -F '|' '$1 == "/var/lib/scrypted/nvr" && NF == 2 && $2 ~ /^[0-9]+$/ { if (++count > 1) exit 1; value=$2 } END { if (count != 1) exit 1; print value }') || return 1
+	recording_nvr2=$(printf '%s\n' "$recordings" | awk -F '|' '$1 == "/var/lib/scrypted/nvr2" && NF == 2 && $2 ~ /^[0-9]+$/ { if (++count > 1) exit 1; value=$2 } END { if (count != 1) exit 1; print value }') || return 1
+	case "$recording_nvr" in ''|*[!0-9]*) return 1;; esac
+	case "$recording_nvr2" in ''|*[!0-9]*) return 1;; esac
+	[ "${#recording_nvr}" -le 15 ] && [ "${#recording_nvr2}" -le 15 ]
+}
+
+recording_mount_counter() {
+	recording_mount_path=$1
+	recording_expected_source=$2
+	recording_target=$(root_path "$recording_mount_path")
+	recording_source=$(findmnt -n -o SOURCE --target "$recording_target") || return 1
+	recording_canonical_source=$(readlink -f "$recording_source") || return 1
+	recording_canonical_expected=$(readlink -f "$recording_expected_source") || return 1
+	[ "$recording_canonical_source" = "$recording_canonical_expected" ] || return 1
+	recording_parent=$(lsblk -ndo PKNAME "$recording_canonical_source") || return 1
+	case "$recording_parent" in ''|.|..|*[!A-Za-z0-9._-]*) return 1;; esac
+	recording_write_sectors=$(awk '{print $7}' "$(root_path "/sys/class/block/$recording_parent/stat")") || return 1
+	case "$recording_write_sectors" in ''|*[!0-9]*) return 1;; esac
+	[ "${#recording_write_sectors}" -le 15 ] || return 1
+	recording_current_source=$(findmnt -n -o SOURCE --target "$recording_target") || return 1
+	recording_current_canonical=$(readlink -f "$recording_current_source") || return 1
+	[ "$recording_current_canonical" = "$recording_canonical_expected" ] || return 1
+	printf '%s|%s\n' "$recording_mount_path" "$recording_write_sectors"
+}
+
+recording_snapshot() {
+	recording_mount_counter /var/lib/scrypted/nvr /dev/disk/by-id/wwn-0x5000000000000001-part1
+	recording_mount_counter /var/lib/scrypted/nvr2 /dev/disk/by-id/wwn-0x5000000000000002-part1
+}
+
+recording_advancing() {
+	prior=$(recording_snapshot) || return 1
+	recording_values "$prior" || return 1
+	prior_nvr=$recording_nvr prior_nvr2=$recording_nvr2
+	sleep 5
+	current=$(recording_snapshot) || return 1
+	recording_values "$current" || return 1
+	[ "$recording_nvr" -ge "$prior_nvr" ] && [ "$recording_nvr2" -ge "$prior_nvr2" ] || return 1
+	[ "$recording_nvr" -gt "$prior_nvr" ] || [ "$recording_nvr2" -gt "$prior_nvr2" ]
+}
+
+validate_stage() (
+	case $# in
+		2) source=$1 baseline=$2; state=$(state_root); stage=$state/stages/$source ;;
+		3) source=$1 baseline=$2 stage=$3 ;;
+		*) exit 1 ;;
+	esac
+	ops_hex64 "$source" && ops_hex64 "$baseline" || return 1
+	[ -d "$stage/incoming" ] && [ ! -L "$stage" ] || return 1
+	[ "$(cat "$stage/source.digest")" = "$source" ] && [ "$(cat "$stage/baseline.digest")" = "$baseline" ] || return 1
+	[ -f "$stage/preflight.digest" ] && [ ! -L "$stage/preflight.digest" ] && ops_hex64 "$(cat "$stage/preflight.digest")" || return 1
+	ops_manifest_shape "$stage/manifest" "$stage/expected-shape" || return 1
+	[ "$(ops_manifest_digest "$stage/manifest")" = "$source" ] || return 1
+	ops_manifest "$stage/incoming" > "$stage/expected-manifest" || return 1
+	cmp -s "$stage/manifest" "$stage/expected-manifest"
+)
+
+observability_units() {
+	cat <<'UNITS'
+openobserve.service
+observe-proxy.service
+otel-collector.service
+otel-docker-agent.service
+observability-storage-metrics.timer
+observability-storage-metrics.service
+var-lib-otelcol.mount
+otelcol-queue-prepare.service
+UNITS
+}
+
+validate_unit_state() {
+	unit_stage=$1
+	unit_state_file=$unit_stage/unit-state
+	[ -f "$unit_state_file" ] && [ ! -L "$unit_state_file" ] || return 1
+	awk -F '|' '
+		BEGIN {
+			expected[1] = "openobserve.service"
+			expected[2] = "observe-proxy.service"
+			expected[3] = "otel-collector.service"
+			expected[4] = "otel-docker-agent.service"
+			expected[5] = "observability-storage-metrics.timer"
+			expected[6] = "observability-storage-metrics.service"
+			expected[7] = "var-lib-otelcol.mount"
+			expected[8] = "otelcol-queue-prepare.service"
+		}
+		NF != 4 || NR > 8 || $1 != expected[NR] || $2 !~ /^(present|absent)$/ || $3 !~ /^(0|1)$/ || $4 !~ /^(0|1)$/ || ($2 == "absent" && ($3 != "0" || $4 != "0")) { invalid = 1 }
+		END { exit (NR != 8 || invalid) }
+	' "$unit_state_file"
+}
+
+capture_unit_state() {
+	unit_stage=$1
+	unit_state_tmp=$(mktemp "$unit_stage/.unit-state.XXXXXX") || fail 'cannot capture prior unit state'
+	while IFS= read -r unit; do
+		if systemctl cat "$unit" >/dev/null 2>&1; then
+			enabled=0 active=0
+			systemctl is-enabled --quiet "$unit" >/dev/null 2>&1 && enabled=1
+			systemctl is-active --quiet "$unit" >/dev/null 2>&1 && active=1
+			printf '%s|present|%s|%s\n' "$unit" "$enabled" "$active" >> "$unit_state_tmp"
+		else
+			printf '%s|absent|0|0\n' "$unit" >> "$unit_state_tmp"
+		fi
+	done <<EOF
+$(observability_units)
+EOF
+	chmod 0600 "$unit_state_tmp"
+	mv -f "$unit_state_tmp" "$unit_stage/unit-state"
+	validate_unit_state "$unit_stage" || fail 'invalid prior unit state'
+}
+
+stop_observability_units() {
+	while IFS= read -r unit; do
+		if systemctl cat "$unit" >/dev/null 2>&1; then systemctl disable --now "$unit"; fi
+	done <<EOF
+$(observability_units)
+EOF
+}
+
+enable_bootstrap_units() {
+	systemctl enable var-lib-otelcol.mount
+	systemctl enable openobserve.service
+}
+
+enable_stack_units() {
+	systemctl enable otel-collector.service
+	systemctl enable otel-docker-agent.service
+	systemctl enable observe-proxy.service
+	systemctl enable observability-storage-metrics.timer
+}
+
+restore_unit_state() {
+	unit_stage=$1
+	validate_unit_state "$unit_stage" || fail 'invalid prior unit state'
+	while IFS='|' read -r unit present enabled active; do
+		[ "$present" = present ] || continue
+		systemctl cat "$unit" >/dev/null 2>&1 || fail 'prior observability unit missing after restoration'
+		if [ "$enabled" = 1 ]; then systemctl enable "$unit"; fi
+		if [ "$active" = 1 ]; then systemctl start "$unit"; fi
+	done < "$unit_stage/unit-state"
+}
+
+protected_state_recheck() {
+	protected_stage=$1
+	protected_label=$2
+	protected_scrypted_match=0 protected_mount_match=0 protected_kernel_delta=1 protected_recording_progress=0
+	if scrypted_snapshot > "$protected_stage/scrypted.$protected_label"; then
+		cmp -s "$protected_stage/scrypted.baseline" "$protected_stage/scrypted.$protected_label" && protected_scrypted_match=1
+	fi
+	if mount_snapshot > "$protected_stage/mounts.$protected_label"; then
+		cmp -s "$protected_stage/mounts.baseline" "$protected_stage/mounts.$protected_label" && protected_mount_match=1
+	fi
+	if kernel_snapshot > "$protected_stage/kernel.$protected_label"; then
+		kernel_warning_delta "$protected_stage/kernel.baseline" "$protected_stage/kernel.$protected_label" && protected_kernel_delta=0
+	fi
+	recording_advancing && protected_recording_progress=1 || :
+}
+
+protected_state_matches() {
+	[ "$protected_scrypted_match:$protected_mount_match:$protected_kernel_delta:$protected_recording_progress" = '1:1:0:1' ]
+}
+
+validate_transaction() {
+	stage=$1
+	[ -f "$stage/transaction-manifest" ] && [ ! -L "$stage/transaction-manifest" ] || return 1
+	awk -F '|' 'NF != 9 || $4 !~ /^(present|absent)$/ || $5 !~ /^[0-9a-f]{64}$/ || $6 !~ /^([0-9a-f]{64}|-)$/ || ($4 == "present" && ($7 !~ /^[0-7]{3,4}$/ || $8 !~ /^[0-9]+$/ || $9 !~ /^[0-9]+$/)) || ($4 == "absent" && ($6 != $5 || $7 != "-" || $8 != "-" || $9 != "-")) { exit 1 }' "$stage/transaction-manifest" || return 1
+	awk -F '|' '{print $1 "|" $2 "|" $3 "|" $5}' "$stage/transaction-manifest" > "$stage/transaction.expected"
+	cmp -s "$stage/manifest" "$stage/transaction.expected" && validate_unit_state "$stage"
+}
+
+# A prior current pointer is trusted only when it is a regular, structurally
+# valid pointer to a completed, self-consistent transaction. Run this in a
+# subshell because the shared shell helpers intentionally use simple globals.
+validate_current_pointer() (
+	pointer_path=$1
+	deploy_state=$2
+	ops_pointer "$pointer_path" || exit 1
+	pointer_stage=$deploy_state/$OPS_POINTER_STAGE
+	[ -d "$pointer_stage" ] && [ ! -L "$pointer_stage" ] || exit 1
+	validate_stage "$OPS_POINTER_SOURCE" "$OPS_POINTER_BASELINE" || exit 1
+	validate_transaction "$pointer_stage" || exit 1
+	[ -f "$pointer_stage/phase" ] && [ ! -L "$pointer_stage/phase" ] || exit 1
+	[ "$(cat "$pointer_stage/phase")" = stack-success ]
+)
+
+validate_prior_current() (
+	transaction_stage=$1
+	deploy_state=$2
+	prior_state_file=$transaction_stage/prior-current-state
+	[ -f "$prior_state_file" ] && [ ! -L "$prior_state_file" ] || exit 1
+	[ "$(wc -l < "$prior_state_file" | tr -d ' ')" = 1 ] || exit 1
+	prior_state=$(cat "$prior_state_file")
+	case "$prior_state" in
+		present)
+			prior_pointer=$transaction_stage/prior-current
+			[ -f "$prior_pointer" ] && [ ! -L "$prior_pointer" ] || exit 1
+			validate_current_pointer "$prior_pointer" "$deploy_state"
+			;;
+		absent) [ ! -e "$transaction_stage/prior-current" ] && [ ! -L "$transaction_stage/prior-current" ] ;;
+		*) exit 1 ;;
+	esac
+)
+
+current_matches_captured_prior() (
+	transaction_stage=$1
+	deploy_state=$2
+	validate_prior_current "$transaction_stage" "$deploy_state" || exit 1
+	prior_state=$(cat "$transaction_stage/prior-current-state")
+	current_pointer=$deploy_state/current
+	case "$prior_state" in
+		present)
+			[ -f "$current_pointer" ] && [ ! -L "$current_pointer" ] || exit 1
+			cmp -s "$current_pointer" "$transaction_stage/prior-current" || exit 1
+			;;
+		absent)
+			[ ! -e "$current_pointer" ] && [ ! -L "$current_pointer" ] || exit 1
+			;;
+		*) exit 1 ;;
+	esac
+)
+
+capture_prior_current() {
+	transaction_stage=$1
+	deploy_state=$2
+	current_pointer=$deploy_state/current
+	if [ -e "$current_pointer" ] || [ -L "$current_pointer" ]; then
+		validate_current_pointer "$current_pointer" "$deploy_state" || fail 'invalid prior current transaction'
+		prior_current_value=$(cat "$current_pointer")
+		ops_atomic "$transaction_stage/prior-current" "$prior_current_value"
+		ops_atomic "$transaction_stage/prior-current-state" present
+	else
+		ops_atomic "$transaction_stage/prior-current-state" absent
+	fi
+	validate_prior_current "$transaction_stage" "$deploy_state" || fail 'invalid captured prior current transaction'
+}
+
+rollback_current_state_valid() (
+	deploy_state=$1
+	transaction_stage=$2
+	rollback_pointer=$3
+	validate_prior_current "$transaction_stage" "$deploy_state" || exit 1
+	prior_state=$(cat "$transaction_stage/prior-current-state")
+	current_pointer=$deploy_state/current
+	if [ -e "$current_pointer" ] || [ -L "$current_pointer" ]; then
+		ops_pointer "$current_pointer" || exit 1
+		cmp -s "$current_pointer" "$rollback_pointer" && exit 0
+		[ "$prior_state" = present ] && cmp -s "$current_pointer" "$transaction_stage/prior-current" && exit 0
+		exit 1
+	fi
+	[ "$prior_state" = absent ]
+)
+
+restore_prior_current() {
+	transaction_stage=$1
+	deploy_state=$2
+	validate_prior_current "$transaction_stage" "$deploy_state" || fail 'invalid prior current transaction'
+	prior_state=$(cat "$transaction_stage/prior-current-state")
+	case "$prior_state" in
+		present) ops_atomic "$deploy_state/current" "$(cat "$transaction_stage/prior-current")" ;;
+		absent) rm -f "$deploy_state/current" ;;
+		*) fail 'invalid prior current state' ;;
+	esac
+}
+
+validate_rollback_recovery() (
+	stage=$1
+	expected_source=$2
+	expected_baseline=$3
+	marker=$stage/rollback-recovery
+	[ -f "$marker" ] && [ ! -L "$marker" ] || exit 1
+	[ "$(wc -l < "$marker" | tr -d ' ')" = 1 ] || exit 1
+	IFS='|' read -r format source baseline preflight stage_pointer prior_state extra < "$marker" || exit 1
+	[ -z "${extra:-}" ] || exit 1
+	[ "$format" = observability-rollback-v1 ] || exit 1
+	ops_hex64 "$source" && ops_hex64 "$baseline" && ops_hex64 "$preflight" || exit 1
+	[ "$source" = "$expected_source" ] && [ "$baseline" = "$expected_baseline" ] || exit 1
+	[ "$stage_pointer" = "stages/$source" ] || exit 1
+	[ -f "$stage/preflight.digest" ] && [ ! -L "$stage/preflight.digest" ] || exit 1
+	[ "$(cat "$stage/preflight.digest")" = "$preflight" ] || exit 1
+	[ -f "$stage/prior-current-state" ] && [ ! -L "$stage/prior-current-state" ] || exit 1
+	[ "$(cat "$stage/prior-current-state")" = "$prior_state" ] || exit 1
+	case "$prior_state" in present|absent) ;; *) exit 1 ;; esac
+)
+
+write_rollback_recovery() {
+	stage=$1
+	source=$2
+	baseline=$3
+	preflight=$4
+	prior_state=$5
+	case "$prior_state" in present|absent) ;; *) fail 'invalid prior current state' ;; esac
+	ops_atomic "$stage/rollback-recovery" "observability-rollback-v1|$source|$baseline|$preflight|stages/$source|$prior_state"
+	validate_rollback_recovery "$stage" "$source" "$baseline" || fail 'invalid rollback recovery marker'
+}
+
+reclaim_rollback_stage() (
+	state=$1
+	source=$2
+	reclaim_source=$source
+	stage=$state/stages/$source
+	reclaim_stage=$stage
+	[ -d "$stage" ] && [ ! -L "$stage" ] || return 1
+	[ -f "$stage/phase" ] && [ ! -L "$stage/phase" ] && [ "$(cat "$stage/phase")" = rollback-success ] || return 1
+	[ -f "$stage/source.digest" ] && [ ! -L "$stage/source.digest" ] || return 1
+	[ -f "$stage/baseline.digest" ] && [ ! -L "$stage/baseline.digest" ] || return 1
+	rollback_stage_source=$(cat "$stage/source.digest")
+	rollback_stage_baseline=$(cat "$stage/baseline.digest")
+	[ "$rollback_stage_source" = "$source" ] || return 1
+	ops_hex64 "$rollback_stage_baseline" || return 1
+	validate_stage "$source" "$rollback_stage_baseline" || return 1
+	validate_transaction "$stage" || return 1
+	validate_rollback_recovery "$stage" "$source" "$rollback_stage_baseline" || return 1
+	current_matches_captured_prior "$stage" "$state" || return 1
+	[ ! -e "$state/pending" ] && [ ! -L "$state/pending" ] || return 1
+	if [ -e "$state/current" ] || [ -L "$state/current" ]; then
+		ops_pointer "$state/current" || return 1
+		[ "$OPS_POINTER_STAGE" != "stages/$reclaim_source" ] || return 1
+	fi
+	retired_root=$state/retired
+	if [ -e "$retired_root" ] || [ -L "$retired_root" ]; then
+		[ -d "$retired_root" ] && [ ! -L "$retired_root" ] || return 1
+	fi
+	install -d -m 0700 "$retired_root"
+	retired_dir=$(mktemp -d "$state/retired/$reclaim_source.XXXXXX") || return 1
+	mv -T -n "$reclaim_stage" "$retired_dir/stage" || return 1
+	[ ! -e "$reclaim_stage" ] && [ ! -L "$reclaim_stage" ] && [ -d "$retired_dir/stage" ] && [ ! -L "$retired_dir/stage" ]
+)
+
+reclaim_staged_stage() (
+	state=$1
+	source=$2
+	stage=$state/stages/$source
+	[ -d "$stage" ] && [ ! -L "$stage" ] || return 1
+	[ -f "$stage/phase" ] && [ ! -L "$stage/phase" ] && [ "$(cat "$stage/phase")" = staged ] || return 1
+	[ ! -e "$state/pending" ] && [ ! -L "$state/pending" ] || return 1
+	[ -f "$stage/source.digest" ] && [ ! -L "$stage/source.digest" ] || return 1
+	[ -f "$stage/baseline.digest" ] && [ ! -L "$stage/baseline.digest" ] || return 1
+	staged_source=$(cat "$stage/source.digest")
+	staged_baseline=$(cat "$stage/baseline.digest")
+	[ "$staged_source" = "$source" ] || return 1
+	ops_hex64 "$staged_baseline" || return 1
+	validate_stage "$source" "$staged_baseline" "$stage" || return 1
+	validate_transaction "$stage" || return 1
+	validate_prior_current "$stage" "$state" || return 1
+	current_matches_captured_prior "$stage" "$state" || return 1
+	if [ -e "$state/current" ] || [ -L "$state/current" ]; then
+		ops_pointer "$state/current" || return 1
+		[ "$OPS_POINTER_STAGE" != "stages/$source" ] || return 1
+	fi
+	retired_root=$state/retired
+	if [ -e "$retired_root" ] || [ -L "$retired_root" ]; then
+		[ -d "$retired_root" ] && [ ! -L "$retired_root" ] || return 1
+	fi
+	install -d -m 0700 "$retired_root"
+	retired_dir=$(mktemp -d "$state/retired/$source.XXXXXX") || return 1
+	mv -T -n "$stage" "$retired_dir/stage" || return 1
+	[ ! -e "$stage" ] && [ ! -L "$stage" ] && [ -d "$retired_dir/stage" ] && [ ! -L "$retired_dir/stage" ]
+)
+
+validate_restored_unit_state() (
+	unit_stage=$1
+	validate_unit_state "$unit_stage" || exit 1
+	while IFS='|' read -r unit present enabled active; do
+		case "$present" in
+			present)
+				systemctl cat "$unit" >/dev/null 2>&1 || exit 1
+				restored_enabled=0 restored_active=0
+				systemctl is-enabled --quiet "$unit" >/dev/null 2>&1 && restored_enabled=1
+				systemctl is-active --quiet "$unit" >/dev/null 2>&1 && restored_active=1
+				[ "$restored_enabled:$restored_active" = "$enabled:$active" ] || exit 1
+				;;
+			absent)
+				if systemctl cat "$unit" >/dev/null 2>&1; then exit 1; fi
+				;;
+			*) exit 1 ;;
+		esac
+	done < "$unit_stage/unit-state"
+)
+
+verify_live() (
+	stage=$1
+	validate_transaction "$stage" || return 1
+	while IFS='|' read -r source destination mode artifact_state digest previous old_mode old_uid old_gid; do
+		path=$(root_path "$destination")
+		case "$artifact_state" in
+			present) [ -f "$path" ] && [ ! -L "$path" ] && [ "$(ops_hash "$path")" = "$previous" ] && [ "$(stat -c '%a|%u|%g' "$path")" = "$old_mode|$old_uid|$old_gid" ] || return 1 ;;
+			absent) [ ! -e "$path" ] && [ ! -L "$path" ] || return 1 ;;
+			*) return 1 ;;
+		esac
+	done < "$stage/transaction-manifest"
+)
+
+install_stage() {
+	stage=$1
+	while IFS='|' read -r source destination mode digest; do
+		path=$(root_path "$destination")
+		install -d -m 0755 "$(dirname "$path")"
+		install -m "$mode" "$stage/incoming/$source" "$path"
+	done < "$stage/manifest"
+}
+
+verify_staged_units() (
+	stage=$1
+	verify_root=$(mktemp -d "$stage/.systemd-verify.XXXXXX") || return 1
+	trap 'rm -rf "$verify_root"' EXIT HUP INT TERM
+	while IFS='|' read -r source destination mode digest; do
+		path=$verify_root$destination
+		install -d -m 0755 "$(dirname "$path")"
+		install -m "$mode" "$stage/incoming/$source" "$path"
+	done < "$stage/manifest"
+	# systemd-analyze --root resolves absolute ExecStart paths and unit
+	# dependencies inside the alternate root. Add inert validation placeholders
+	# for host-provided executables/units; nothing in this tree is installed or
+	# executed, and the staged units remain the only deployment artifacts.
+	for executable in /usr/bin/install /usr/bin/docker /usr/bin/stat /usr/bin/truncate /usr/sbin/mkfs.ext4 /usr/bin/true /bin/sh; do
+		path=$verify_root$executable
+		install -d -m 0755 "$(dirname "$path")"
+		install -m 0755 /dev/null "$path"
+	done
+	for unit in sysinit.target docker.service network-online.target network.target multi-user.target timers.target; do
+		path=$verify_root/etc/systemd/system/$unit
+		install -d -m 0755 "$(dirname "$path")"
+		if [ "$unit" = docker.service ]; then
+			printf '[Unit]\nDescription=staged verification placeholder\n[Service]\nType=oneshot\nExecStart=/usr/bin/true\n' > "$path"
+		else
+			printf '[Unit]\nDescription=staged verification placeholder\n' > "$path"
+		fi
+	done
+	systemd-analyze --root="$verify_root" verify \
+		openobserve.service \
+		observe-proxy.service \
+		otel-collector.service \
+		otel-docker-agent.service \
+		observability-storage-metrics.service \
+		observability-storage-metrics.timer \
+		var-lib-otelcol.mount \
+		otelcol-queue-prepare.service
+)
+
+stage() {
+	source=$1 baseline=$2 preflight_bound=$3 recording_nvr=$4 recording_nvr2=$5
+	ops_hex64 "$source" && ops_hex64 "$baseline" && ops_hex64 "$preflight_bound" || fail 'invalid transaction digest'
+	case "$recording_nvr" in ''|*[!0-9]*) fail 'invalid recording baseline';; esac
+	case "$recording_nvr2" in ''|*[!0-9]*) fail 'invalid recording baseline';; esac
+	require_preflight_prerequisites || fail 'preflight prerequisites failed'
+	[ "$(invariant)" = "$baseline" ] || fail 'baseline drift before stage'
+	[ "$(preflight_evidence)" = "$preflight_bound" ] || fail 'preflight evidence drift before stage'
+	# Receipt counters bind the preflight but cannot substitute for an immediate
+	# proof that the exact recording devices are still advancing.
+	recording_advancing || fail 'recording progress unavailable or static before stage'
+	state=$(state_root)
+	deploy_state=$state
+	final_stage=$state/stages/$source
+	install -d -m 0700 "$state/stages"
+	[ ! -e "$state/pending" ] && [ ! -L "$state/pending" ] || fail 'pending transaction exists'
+	if [ -e "$final_stage" ] || [ -L "$final_stage" ]; then
+		if [ -f "$final_stage/phase" ] && [ "$(cat "$final_stage/phase")" = rollback-success ]; then
+			reclaim_rollback_stage "$state" "$source" || fail 'stage already exists'
+		else
+			reclaim_staged_stage "$state" "$source" || fail 'stage already exists'
+		fi
+	fi
+	tmp_stage=$(mktemp -d "$state/stages/.$source.XXXXXX") || fail 'cannot create temporary stage'
+	stage=$tmp_stage
+	cleanup_stage() { rm -rf "$tmp_stage"; }
+	trap cleanup_stage EXIT HUP INT TERM
+	capture_prior_current "$stage" "$state"
+	capture_unit_state "$stage"
+	archive=$stage/archive.tar
+	cat > "$archive"
+	members=$(tar -tf "$archive") || fail 'invalid archive'
+	case "$members" in *'..'*|*'//'*) fail 'unsafe archive path';; esac
+	printf '%s\n' "$members" | LC_ALL=C sort | uniq -d | grep -q . && fail 'duplicate archive member'
+	expected_members=$(ops_map | cut -d '|' -f 1; printf '%s\n' .observability-manifest)
+	[ "$members" = "$expected_members" ] || fail 'archive member set differs'
+	tar -tvf "$archive" | awk 'substr($1,1,1) != "-" { exit 1 }' || fail 'archive contains non-regular member'
+	mkdir -m 0700 "$stage/incoming"
+	tar -xf "$archive" -C "$stage/incoming"
+	mv "$stage/incoming/.observability-manifest" "$stage/manifest"
+	ops_manifest_shape "$stage/manifest" "$stage/expected-shape" || fail 'unsafe manifest'
+	ops_manifest "$stage/incoming" > "$stage/expected-manifest" || fail 'manifest source missing'
+	cmp -s "$stage/manifest" "$stage/expected-manifest" || fail 'manifest hash, destination, or mode mismatch'
+	[ "$(ops_manifest_digest "$stage/manifest")" = "$source" ] || fail 'source digest does not match staged manifest'
+	install -d -m 0700 "$stage/backup"
+	printf '%s\n' "$source" > "$stage/source.digest"
+	printf '%s\n' "$baseline" > "$stage/baseline.digest"
+	printf '%s\n' "$preflight_bound" > "$stage/preflight.digest"
+	printf '/var/lib/scrypted/nvr|%s\n/var/lib/scrypted/nvr2|%s\n' "$recording_nvr" "$recording_nvr2" > "$stage/recording.receipt"
+	scrypted_snapshot > "$stage/scrypted.baseline"
+	mount_snapshot > "$stage/mounts.baseline"
+	kernel_snapshot > "$stage/kernel.baseline"
+	architecture_snapshot > "$stage/architecture.baseline"
+	: > "$stage/transaction-manifest"
+	while IFS='|' read -r item destination mode digest; do
+		path=$(root_path "$destination")
+		relative=${destination#/}
+		[ ! -L "$path" ] || fail 'deployed artifact is symlink'
+		if [ -e "$path" ]; then
+			[ -f "$path" ] || fail 'deployed artifact is non-regular'
+			install -d -m 0700 "$(dirname "$stage/backup/$relative")"
+			cp -p "$path" "$stage/backup/$relative"
+			state_name=present
+			previous=$(ops_hash "$path")
+			old_meta=$(stat -c '%a|%u|%g' "$path")
+			IFS='|' read -r old_mode old_uid old_gid <<EOF
+$old_meta
+EOF
+		else
+			state_name=absent
+			previous=$digest
+			old_mode=- old_uid=- old_gid=-
+		fi
+		printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$item" "$destination" "$mode" "$state_name" "$digest" "$previous" "$old_mode" "$old_uid" "$old_gid" >> "$stage/transaction-manifest"
+	done < "$stage/manifest"
+	validate_transaction "$stage" || fail 'transaction manifest mismatch'
+	verify_staged_units "$stage" || fail 'staged systemd units failed verification'
+	current_matches_captured_prior "$stage" "$deploy_state" || fail 'current pointer changed during stage'
+	ops_atomic "$stage/phase" staged
+	validate_stage "$source" "$baseline" "$stage" || fail 'temporary stage validation failed'
+	validate_transaction "$stage" || fail 'temporary transaction manifest mismatch'
+	mv -T -n "$stage" "$final_stage" || fail 'could not publish stage'
+	[ ! -e "$stage" ] && [ ! -L "$stage" ] || fail 'stage publication left temporary path'
+	[ -d "$final_stage" ] && [ ! -L "$final_stage" ] || fail 'stage publication missing final path'
+	validate_stage "$source" "$baseline" "$final_stage" || fail 'published stage validation failed'
+	validate_transaction "$final_stage" || fail 'published transaction manifest mismatch'
+	stage=$final_stage
+	# The published stage is now the recoverable receipt. Disarm the temporary
+	# cleanup before committing pending so a crash cannot remove the receipt.
+	trap - EXIT HUP INT TERM
+	ops_atomic "$state/pending" "$source|$baseline|stages/$source"
+	echo 'stage=verified'
+}
+
+stage_receipt_evidence() {
+	stage=$1 expected_preflight=$2
+	ops_hex64 "$expected_preflight" && [ -f "$stage/preflight.digest" ] && [ ! -L "$stage/preflight.digest" ] && [ "$(cat "$stage/preflight.digest")" = "$expected_preflight" ]
+}
+
+start_bootstrap() {
+	source=$1 baseline=$2 expected_preflight=$3
+	state=$(state_root)
+	deploy_state=$state
+	ops_pointer "$state/pending" || fail 'missing pending transaction'
+	[ "$OPS_POINTER_SOURCE:$OPS_POINTER_BASELINE" = "$source:$baseline" ] || fail 'pending transaction mismatch'
+	stage=$state/$OPS_POINTER_STAGE
+	stage_receipt_evidence "$stage" "$expected_preflight" || fail 'preflight receipt mismatch'
+	[ "$(cat "$stage/phase")" = staged ] || fail 'bootstrap phase is out of order'
+	validate_stage "$source" "$baseline" && validate_transaction "$stage" && verify_live "$stage" && [ "$(invariant)" = "$baseline" ] || fail 'staged or protected state drifted'
+	current_matches_captured_prior "$stage" "$deploy_state" || fail 'current pointer changed before bootstrap'
+	recording_advancing || fail 'recording progress unavailable or static before bootstrap'
+	ops_atomic "$stage/phase" bootstrap-installing
+	install_stage "$stage"
+	ops_deployed_manifest "$(root_path /)" > "$stage/deployed-manifest"
+	cmp -s "$stage/manifest" "$stage/deployed-manifest" || fail 'deployed artifact drift'
+	systemctl daemon-reload
+	. "$stage/incoming/config/observability/images.env"
+	docker pull "$OPENOBSERVE_IMAGE"
+	ops_deployed_manifest "$(root_path /)" > "$stage/deployed-manifest"
+	cmp -s "$stage/manifest" "$stage/deployed-manifest" || fail 'deployed artifact drift before start'
+	enable_bootstrap_units
+	systemctl start var-lib-otelcol.mount
+	systemctl start openobserve.service
+	ops_atomic "$stage/phase" bootstrap-success
+	echo 'start-bootstrap=verified'
+}
+
+start_stack() {
+	source=$1 baseline=$2 expected_preflight=$3
+	state=$(state_root)
+	deploy_state=$state
+	ops_pointer "$state/pending" || fail 'missing pending transaction'
+	[ "$OPS_POINTER_SOURCE:$OPS_POINTER_BASELINE" = "$source:$baseline" ] || fail 'pending transaction mismatch'
+	stage=$state/$OPS_POINTER_STAGE
+	stage_receipt_evidence "$stage" "$expected_preflight" || fail 'preflight receipt mismatch'
+	[ "$(cat "$stage/phase")" = bootstrap-success ] || fail 'stack phase is out of order'
+	validate_stage "$source" "$baseline" && validate_transaction "$stage" && [ "$(invariant)" = "$baseline" ] || fail 'staged or protected state drifted'
+	current_matches_captured_prior "$stage" "$deploy_state" || fail 'current pointer changed before stack'
+	ops_deployed_manifest "$(root_path /)" > "$stage/deployed-manifest"
+	cmp -s "$stage/manifest" "$stage/deployed-manifest" || fail 'deployed artifact drift'
+	recording_advancing || fail 'recording progress unavailable or static before stack'
+	ops_atomic "$stage/phase" stack-starting
+	. "$stage/incoming/config/observability/images.env"
+	docker pull "$OTELCOL_IMAGE"
+	docker pull "$CADDY_IMAGE"
+	ops_deployed_manifest "$(root_path /)" > "$stage/deployed-manifest"
+	cmp -s "$stage/manifest" "$stage/deployed-manifest" || fail 'deployed artifact drift before start'
+	enable_stack_units
+	systemctl start otel-collector.service
+	systemctl start otel-docker-agent.service
+	systemctl start observe-proxy.service
+	systemctl start observability-storage-metrics.timer
+	recording_advancing || fail 'recording progress unavailable or static after stack'
+	ops_atomic "$stage/phase" stack-success
+	current_matches_captured_prior "$stage" "$deploy_state" || fail 'current pointer changed before current commit'
+	ops_atomic "$state/current" "$source|$baseline|stages/$source"
+	rm -f "$state/pending"
+	echo 'start-stack=verified'
+}
+
+rollback() {
+	expected_source=$1 expected_baseline=$2 expected_preflight=$3
+	state=$(state_root)
+	deploy_state=$state
+	if [ -e "$state/pending" ] || [ -L "$state/pending" ]; then pointer=$state/pending; clear_pending=true; else pointer=$state/current; clear_pending=false; fi
+	ops_pointer "$pointer" || fail 'invalid transaction pointer'
+	[ "$OPS_POINTER_SOURCE:$OPS_POINTER_BASELINE" = "$expected_source:$expected_baseline" ] || fail 'receipt transaction mismatch'
+	rollback_source=$OPS_POINTER_SOURCE rollback_baseline=$OPS_POINTER_BASELINE
+	stage=$state/$OPS_POINTER_STAGE
+	stage_receipt_evidence "$stage" "$expected_preflight" || fail 'preflight receipt mismatch'
+	validate_stage "$OPS_POINTER_SOURCE" "$OPS_POINTER_BASELINE" && validate_transaction "$stage" && validate_prior_current "$stage" "$state" && rollback_current_state_valid "$state" "$stage" "$pointer" || fail 'invalid transaction state'
+	rollback_prior_state=$(cat "$stage/prior-current-state")
+	if [ "$clear_pending" = false ]; then
+		ops_atomic "$deploy_state/pending" "$rollback_source|$rollback_baseline|stages/$rollback_source" || fail 'could not create rollback recovery pointer'
+		clear_pending=true
+	fi
+	stop_observability_units
+	while IFS='|' read -r item destination mode state_name digest previous old_mode old_uid old_gid; do
+		path=$(root_path "$destination")
+		relative=${destination#/}
+		case "$state_name" in
+			present) [ -f "$stage/backup/$relative" ] && [ ! -L "$stage/backup/$relative" ] && [ "$(ops_hash "$stage/backup/$relative")" = "$previous" ] || fail 'missing backup'; install -d -m 0755 "$(dirname "$path")"; install -m "$old_mode" "$stage/backup/$relative" "$path"; chown "$old_uid:$old_gid" "$path" ;;
+			absent) rm -f "$path" ;;
+			*) fail 'invalid restore state' ;;
+		esac
+	done < "$stage/transaction-manifest"
+	systemctl daemon-reload
+	restore_unit_state "$stage"
+	restore_prior_current "$stage" "$state"
+	verify_live "$stage" || fail 'rollback artifact restoration mismatch'
+	validate_restored_unit_state "$stage" || fail 'rollback unit state restoration mismatch'
+	current_matches_captured_prior "$stage" "$(state_root)" || fail 'rollback pointer restoration mismatch'
+	# A protected-state regression is significant, but rollback is deliberately
+	# preservation-first: report it only after artifacts, unit state, and
+	# transaction pointers have been restored.
+	protected_state_recheck "$stage" rollback
+	printf 'scrypted_pid_start_restart_match=%s\nmount_identity_rw_match=%s\nkernel_warning_delta=%s\nrecording_progress=%s\n' "$protected_scrypted_match" "$protected_mount_match" "$protected_kernel_delta" "$protected_recording_progress"
+	if protected_state_matches; then
+		write_rollback_recovery "$stage" "$rollback_source" "$rollback_baseline" "$expected_preflight" "$rollback_prior_state"
+		ops_atomic "$stage/phase" rollback-success
+		[ "$clear_pending" = true ] && rm -f "$deploy_state/pending"
+		echo 'rollback=verified'
+	else
+		echo 'rollback=restored-protected-drift'
+		return 1
+	fi
+}
+
+preflight() {
+	require_preflight_prerequisites || fail 'preflight prerequisites failed'
+	baseline=$(invariant)
+	ops_hex64 "$baseline" || fail 'invalid baseline'
+	preflight_digest=$(preflight_evidence)
+	ops_hex64 "$preflight_digest" || fail 'invalid preflight evidence'
+	recording_advancing || fail 'recording progress unavailable or static'
+	printf 'baseline=%s\npreflight_digest=%s\nrecording_nvr=%s\nrecording_nvr2=%s\norigin=%s\ncertificate_name=%s\n' "$baseline" "$preflight_digest" "$recording_nvr" "$recording_nvr2" "$(ops_origin)" "$(ops_certificate_name)"
+}
+
+postflight() {
+	source=$1 baseline=$2 expected_preflight=$3
+	state=$(state_root)
+	if [ -e "$state/pending" ] || [ -L "$state/pending" ]; then pointer=$state/pending; else pointer=$state/current; fi
+	ops_pointer "$pointer" || fail 'missing transaction pointer'
+	[ "$OPS_POINTER_SOURCE:$OPS_POINTER_BASELINE" = "$source:$baseline" ] || fail 'receipt transaction mismatch'
+	stage=$state/$OPS_POINTER_STAGE
+	stage_receipt_evidence "$stage" "$expected_preflight" || fail 'preflight receipt mismatch'
+	validate_stage "$source" "$baseline" && validate_transaction "$stage" || fail 'stage drift'
+	ops_deployed_manifest "$(root_path /)" > "$stage/deployed-manifest"
+	cmp -s "$stage/manifest" "$stage/deployed-manifest" || fail 'deployed artifact drift'
+	scrypted_snapshot > "$stage/scrypted.current"
+	mount_snapshot > "$stage/mounts.current"
+	kernel_snapshot > "$stage/kernel.current"
+	architecture_snapshot > "$stage/architecture.current"
+	scrypted_match=0 mount_match=0 recording_match=0 kernel_delta=1 capacity_memory_match=0 architecture_match=0 dns_match=0
+	cmp -s "$stage/scrypted.baseline" "$stage/scrypted.current" && scrypted_match=1
+	cmp -s "$stage/mounts.baseline" "$stage/mounts.current" && mount_match=1
+	kernel_warning_delta "$stage/kernel.baseline" "$stage/kernel.current" && kernel_delta=0
+	cmp -s "$stage/architecture.baseline" "$stage/architecture.current" && architecture_match=1
+	[ "$scrypted_match:$mount_match:$kernel_delta:$architecture_match" = '1:1:0:1' ] || fail 'protected state drifted'
+	recording_advancing && recording_match=1
+	[ "$recording_match" = 1 ] || fail 'recording progress regressed'
+	capacity_memory_healthy && capacity_memory_match=1
+	dns_healthy && dns_match=1
+	[ "$capacity_memory_match:$dns_match" = '1:1' ] || fail 'postflight prerequisites failed'
+	# The stable protected snapshots and kernel-warning delta above supersede an
+	# exact invariant hash: retained journal lines may disappear between phases.
+	curl --fail --silent --output /dev/null http://127.0.0.1:5080/healthz || fail 'OpenObserve health probe failed'
+	udp_443_free || fail 'UDP 443 listener is not permitted'
+	unit_count=0
+	for unit in openobserve.service observe-proxy.service otel-collector.service otel-docker-agent.service; do systemctl is-active --quiet "$unit" >/dev/null 2>&1 && unit_count=$((unit_count + 1)); done
+	[ "$unit_count" = 4 ] || fail 'observability unit is not active'
+	container_caps=
+	for cap in \
+		'openobserve|3221225472|2000000000' \
+		'otel-collector|536870912|1000000000' \
+		'otel-docker-agent|402653184|500000000' \
+		'observe-proxy|268435456|500000000'; do
+		IFS='|' read -r container memory cpu <<EOF
+$cap
+EOF
+		actual=$(docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}' "$container") || fail 'observability container missing'
+		[ "$actual" = "$memory $cpu" ] || fail 'observability container cap mismatch'
+		if [ -z "$container_caps" ]; then container_caps=$container:$memory:$cpu; else container_caps=$container_caps,$container:$memory:$cpu; fi
+	done
+	container_count=4
+	listener_expected='10.10.10.50:443,127.0.0.1:4318,127.0.0.1:4319,127.0.0.1:4320,127.0.0.1:5080,127.0.0.1:5081,127.0.0.1:8888'
+	listeners=$(ss -ltn | awk '
+		NR > 1 {
+			address=$4
+			if (address ~ /:443$/ || address ~ /:4318$/ || address ~ /:4319$/ || address ~ /:4320$/ || address ~ /:5080$/ || address ~ /:5081$/ || address ~ /:8888$/) {
+				if (address == "10.10.10.50:443" || address == "127.0.0.1:4318" || address == "127.0.0.1:4319" || address == "127.0.0.1:4320" || address == "127.0.0.1:5080" || address == "127.0.0.1:5081" || address == "127.0.0.1:8888") print address; else { print "!invalid"; exit }
+			}
+		}
+	' | LC_ALL=C sort | paste -sd, -) || fail 'invalid observability listener'
+	[ "$listeners" = "$listener_expected" ] || fail 'listener set differs from approved contract'
+	listener_count=7
+	queue_bytes=$(du -sk "$(root_path /var/lib/otelcol)" 2>/dev/null | awk 'NR == 1 { print $1 * 1024 } END { if (NR == 0) print 0 }')
+	case "$queue_bytes" in ''|*[!0-9]*) fail 'invalid queue size';; esac
+	[ "$queue_bytes" -le 268435456 ] || fail 'collector queue exceeds physical bound'
+	metrics_file=$(mktemp "$state/.collector-metrics.XXXXXX") || fail 'cannot create metric parser input'
+	cert_file=$(mktemp "$state/.certificate.XXXXXX") || fail 'cannot create certificate parser input'
+	trap 'rm -f "$metrics_file" "$cert_file"' EXIT HUP INT TERM
+	curl --fail --silent --show-error --max-time 5 --max-filesize 1048576 --output "$metrics_file" http://127.0.0.1:8888/metrics || fail 'collector metrics probe failed'
+	awk '
+		/^otelcol_/ {
+			name=$1; sub(/\{.*/, "", name)
+			if (name !~ /^otelcol_(receiver_accepted_metric_points|receiver_refused_metric_points|exporter_sent_metric_points|exporter_send_failed_metric_points|exporter_enqueue_failed_metric_points|exporter_queue_size|exporter_queue_capacity)$/) next
+			print name
+			labels=$1; if (labels ~ /\{/) { sub(/^[^{]*\{/, "", labels); sub(/\}.*/, "", labels); n=split(labels, pair, ","); for (i=1; i<=n; i++) { split(pair[i], key_value, "="); key=key_value[1]; if (key !~ /^(data_type|exporter|receiver|server_address|server_port|service_instance_id|service_name|service_version|transport|url_path)$/) exit 1; print "@" key } }
+		}
+	' "$metrics_file" > "$state/.collector-metadata" || fail 'unapproved collector metric or attribute'
+	metric_names=$(grep -v '^@' "$state/.collector-metadata" | LC_ALL=C sort -u | paste -sd, -)
+	[ -n "$metric_names" ] || metric_names=none
+	metric_count=$(printf '%s\n' "$metric_names" | awk -F ',' '$1 == "none" { print 0; next } { print NF }')
+	[ "$metric_count" -le 7 ] || fail 'unexpected collector metric name'
+	attribute_names=$(sed -n 's/^@//p' "$state/.collector-metadata" | LC_ALL=C sort -u | paste -sd, -)
+	[ -n "$attribute_names" ] || attribute_names=none
+	openssl s_client -connect 10.10.10.50:443 -servername "$(ops_certificate_name)" -verify_return_error -verify_hostname "$(ops_certificate_name)" </dev/null > "$cert_file" 2>/dev/null || fail 'certificate identity probe failed'
+	cert_end=$(openssl x509 -in "$cert_file" -noout -enddate 2>/dev/null | sed -n 's/^notAfter=//p') || fail 'certificate expiry probe failed'
+	cert_seconds=$(date -j -f '%b %e %T %Y %Z' "$cert_end" +%s 2>/dev/null || date -d "$cert_end" +%s 2>/dev/null) || fail 'certificate expiry parse failed'
+	now_seconds=$(date +%s)
+	cert_days=$(( (cert_seconds - now_seconds) / 86400 ))
+	[ "$cert_days" -ge 0 ] || fail 'certificate expired'
+	printf 'schema=observability-postflight-v1\nsource_digest=%s\nbaseline_match=1\nscrypted_pid_start_restart_match=%s\nmount_identity_rw_match=%s\nrecording_progress_nonregression=%s\nkernel_warning_delta=%s\ncapacity_memory_prerequisites=%s\ndns_prerequisite=%s\narchitecture_prerequisite=%s\nopenobserve_health=ok\nunit_count=%s\ncontainer_count=%s\ncontainer_caps=%s\nlistener_count=%s\nlistener_addresses=%s\nqueue_bytes=%s\ncollector_metric_count=%s\ncollector_metric_names=%s\ncollector_attribute_names=%s\ncertificate_name=%s\ncertificate_expiry_days=%s\n' "$source" "$scrypted_match" "$mount_match" "$recording_match" "$kernel_delta" "$capacity_memory_match" "$dns_match" "$architecture_match" "$unit_count" "$container_count" "$container_caps" "$listener_count" "$listeners" "$queue_bytes" "$metric_count" "$metric_names" "$attribute_names" "$(ops_certificate_name)" "$cert_days"
+	rm -f "$metrics_file" "$cert_file" "$state/.collector-metadata"
+	trap - EXIT HUP INT TERM
+}
+
+[ "$#" -ge 1 ] || fail 'missing remote command'
+command=$1
+shift
+case "$command" in
+	stage|start-bootstrap|start-stack|rollback)
+		command -v flock >/dev/null 2>&1 || fail 'flock is required for deploy-state mutation'
+		lock_state=$(state_root)
+		if [ -e "$lock_state" ] || [ -L "$lock_state" ]; then
+			[ -d "$lock_state" ] && [ ! -L "$lock_state" ] || fail 'invalid deploy-state directory'
+		else
+			install -d -m 0700 "$lock_state" || fail 'cannot create deploy-state directory'
+		fi
+		lock_path=$lock_state/.lock
+		[ ! -L "$lock_path" ] || fail 'invalid deploy-state lock'
+		if [ -e "$lock_path" ]; then [ -f "$lock_path" ] || fail 'invalid deploy-state lock'; fi
+		exec 9>"$lock_path" || fail 'cannot open deploy-state lock'
+		flock -n 9 || fail 'deploy-state is busy'
+		;;
+esac
+case "$command" in
+	stage) [ "$#" -eq 5 ] || fail 'remote stage arguments required'; stage "$1" "$2" "$3" "$4" "$5" ;;
+	start-bootstrap) [ "$#" -eq 3 ] || fail 'remote receipt arguments required'; start_bootstrap "$1" "$2" "$3" ;;
+	start-stack) [ "$#" -eq 3 ] || fail 'remote receipt arguments required'; start_stack "$1" "$2" "$3" ;;
+	postflight) [ "$#" -eq 3 ] || fail 'remote receipt arguments required'; postflight "$1" "$2" "$3" ;;
+	rollback) [ "$#" -eq 3 ] || fail 'remote receipt arguments required'; rollback "$1" "$2" "$3" ;;
+	preflight) [ "$#" -eq 0 ] || fail 'unexpected remote argument'; "$command" ;;
+	*) fail 'unknown remote command' ;;
+esac

@@ -1,0 +1,78 @@
+{
+  "ignition": {"version": "3.4.0"},
+  "passwd": {
+    "users": [{
+      "name": "core",
+      "sshAuthorizedKeys": ["REPLACE_WITH_MANAGEMENT_SSH_PUBLIC_KEY"]
+    }]
+  },
+  "storage": {
+    "directories": [
+      {"path": "/etc/scrypted", "mode": 448},
+      {"path": "/var/lib/scrypted", "mode": 488},
+      {"path": "/var/lib/scrypted/volume", "mode": 488},
+      {"path": "/var/lib/scrypted/nvr", "mode": 488},
+      {"path": "/var/lib/scrypted/nvr2", "mode": 488},
+      {"path": "/var/log/journal", "mode": 493},
+      {"path": "/etc/observability", "mode": 493},
+      {"path": "/etc/observability/secrets", "mode": 448},
+      {"path": "/var/lib/openobserve", "mode": 488},
+      {"path": "/var/lib/observability", "mode": 488},
+      {"path": "/var/lib/observability/caddy", "mode": 488},
+      {"path": "/var/lib/observability/caddy/data", "mode": 488},
+      {"path": "/var/lib/observability/caddy/config", "mode": 488},
+      {"path": "/var/lib/otelcol", "mode": 488}
+    ],
+    "files": [
+      {"overwrite": true, "path": "/etc/hostname", "contents": {"compression": "", "source": "data:,scrypted-nvr%0A"}, "mode": 420},
+      {"overwrite": true, "path": "/etc/timezone", "contents": {"compression": "", "source": "data:,Etc%2FUTC%0A"}, "mode": 420},
+      {"overwrite": true, "path": "/etc/systemd/network/10-wired.network", "contents": {"compression": "", "source": "data:,%5BMatch%5D%0AName%3Den*%0AType%3Dether%0A%0A%5BNetwork%5D%0AAddress%3D10.10.10.50%2F24%0AGateway%3D10.10.10.1%0ADNS%3D10.10.10.53%0ADomains%3Dhome.arpa%0AIPv6AcceptRA%3Dyes%0A%0A%5BLink%5D%0ARequiredForOnline%3Droutable%0A"}, "mode": 420},
+      {"overwrite": true, "path": "/etc/ssh/sshd_config.d/10-key-only.conf", "contents": {"compression": "", "source": "data:,PasswordAuthentication%20no%0AKbdInteractiveAuthentication%20no%0AChallengeResponseAuthentication%20no%0APermitRootLogin%20no%0APubkeyAuthentication%20yes%0A"}, "mode": 420},
+      {"overwrite": true, "path": "/etc/systemd/logind.conf.d/10-lid-server.conf", "contents": {"compression": "gzip", "source": "data:;base64,H4sIAAAAAAAC/4r2yU/PzIvl8kjMS8lJ9clMCS7PLEnOsM1Mz8svSkUXdq0oSS3KS8wJyC9PLcKhxiU/OTs1BSYJF/YE8z3zMjKTMktSU2zz8rkAAQAA//8ThZrsfAAAAA=="}, "mode": 420},
+      {"overwrite": true, "path": "/etc/systemd/sleep.conf.d/10-disable-sleep.conf", "contents": {"compression": "", "source": "data:,%5BSleep%5D%0AAllowSuspend%3Dno%0AAllowHibernation%3Dno%0AAllowSuspendThenHibernate%3Dno%0AAllowHybridSleep%3Dno%0A"}, "mode": 420},
+      {"overwrite": true, "path": "/etc/systemd/journald.conf.d/10-appliance.conf", "contents": {"compression": "", "source": "data:,%5BJournal%5D%0AStorage%3Dpersistent%0ASystemMaxUse%3D512M%0ARuntimeMaxUse%3D128M%0ASystemMaxFileSize%3D64M%0AMaxFileSec%3D7day%0ACompress%3Dyes%0A"}, "mode": 420},
+      {"overwrite": true, "path": "/etc/docker/daemon.json", "contents": {"compression": "", "source": "data:;base64,ewogICJsb2ctZHJpdmVyIjogImpvdXJuYWxkIgp9Cg=="}, "mode": 420},
+      {"overwrite": true, "path": "/etc/flatcar/update.conf", "contents": {"compression": "", "source": "data:,REBOOT_STRATEGY%3Dreboot%0ALOCKSMITHD_REBOOT_WINDOW_START%3D%22Sun%2003%3A00%22%0ALOCKSMITHD_REBOOT_WINDOW_LENGTH%3D1h%0A"}, "mode": 420}
+    ],
+    "links": [{"overwrite": true, "path": "/etc/localtime", "target": "../usr/share/zoneinfo/Etc/UTC"}]
+  },
+  "systemd": {
+    "units": [
+      {"enabled": true, "name": "docker.service"},
+      {"enabled": true, "name": "update-engine.service"},
+      {"enabled": true, "name": "locksmithd.service"},
+      {"mask": true, "name": "sleep.target"},
+      {"mask": true, "name": "suspend.target"},
+      {"mask": true, "name": "hibernate.target"},
+      {"mask": true, "name": "hybrid-sleep.target"},
+      {"mask": true, "name": "suspend-then-hibernate.target"},
+      {"mask": true, "name": "avahi-daemon.service"},
+      {"mask": true, "name": "avahi-daemon.socket"},
+      {
+        "contents": "[Unit]\nDescription=Scrypted NVR recording disk 1\nConditionPathExists=/dev/disk/by-id/wwn-0x5000000000000001-part1\nRequires=systemd-fsck@dev-disk-by\\x2did-wwn\\x2d0x5000000000000001\\x2dpart1.service\nAfter=systemd-fsck@dev-disk-by\\x2did-wwn\\x2d0x5000000000000001\\x2dpart1.service\nBefore=scrypted.service\n\n[Mount]\nWhat=/dev/disk/by-id/wwn-0x5000000000000001-part1\nWhere=/var/lib/scrypted/nvr\nType=ext4\nOptions=noatime,nodiratime\nTimeoutSec=30\n\n[Install]\nWantedBy=multi-user.target\n",
+        "enabled": true,
+        "name": "var-lib-scrypted-nvr.mount"
+      },
+      {
+        "contents": "[Unit]\nDescription=Scrypted NVR recording disk 2\nConditionPathExists=/dev/disk/by-id/wwn-0x5000000000000002-part1\nRequires=systemd-fsck@dev-disk-by\\x2did-wwn\\x2d0x5000000000000002\\x2dpart1.service\nAfter=systemd-fsck@dev-disk-by\\x2did-wwn\\x2d0x5000000000000002\\x2dpart1.service\nBefore=scrypted.service\n\n[Mount]\nWhat=/dev/disk/by-id/wwn-0x5000000000000002-part1\nWhere=/var/lib/scrypted/nvr2\nType=ext4\nOptions=noatime,nodiratime\nTimeoutSec=30\n\n[Install]\nWantedBy=multi-user.target\n",
+        "enabled": true,
+        "name": "var-lib-scrypted-nvr2.mount"
+      },
+      {
+        "contents": "[Unit]\nDescription=Scrypted-scoped Watchtower updater\nWants=network-online.target\nAfter=network-online.target docker.service\nRequires=docker.service\n\n[Service]\nEnvironmentFile=/etc/scrypted/scrypted.env\nTimeoutStartSec=0\nExecStartPre=-/usr/bin/docker rm --force scrypted-watchtower\nExecStartPre=/usr/bin/docker pull nickfedor/watchtower\nExecStart=/usr/bin/docker run --name scrypted-watchtower \\\n  --label com.centurylinklabs.watchtower.scope=scrypted \\\n  --env WATCHTOWER_HTTP_API_TOKEN \\\n  --env WATCHTOWER_HTTP_API_UPDATE=true \\\n  --env WATCHTOWER_SCOPE=scrypted \\\n  --env WATCHTOWER_HTTP_API_PERIODIC_POLLS=true \\\n  --volume /var/run/docker.sock:/var/run/docker.sock \\\n  --publish 127.0.0.1:10444:8080 \\\n  --dns 10.10.10.53 \\\n  --log-driver journald \\\n  nickfedor/watchtower --interval 3600 --cleanup --scope scrypted\nExecStop=-/usr/bin/docker stop --time 30 scrypted-watchtower\nRestart=always\nRestartSec=10\nStandardOutput=journal\nStandardError=journal\n\n[Install]\nWantedBy=multi-user.target\n",
+        "enabled": true,
+        "name": "scrypted-watchtower.service"
+      },
+      {
+        "contents": "[Unit]\nDescription=Scrypted NVR\nConditionPathExists=/dev/disk/by-id/wwn-0x5000000000000001-part1\nConditionPathExists=/dev/disk/by-id/wwn-0x5000000000000002-part1\nConditionPathExists=!/etc/scrypted/disable-auto-recovery\nWants=network-online.target scrypted-watchtower.service\nAfter=network-online.target docker.service scrypted-watchtower.service var-lib-scrypted-nvr.mount var-lib-scrypted-nvr2.mount\nRequires=docker.service var-lib-scrypted-nvr.mount var-lib-scrypted-nvr2.mount\n\n[Service]\nEnvironmentFile=/etc/scrypted/scrypted.env\nTimeoutStartSec=0\nExecStartPre=/usr/bin/mountpoint --quiet /var/lib/scrypted/nvr\nExecStartPre=/usr/bin/mountpoint --quiet /var/lib/scrypted/nvr2\nExecStartPre=/usr/bin/test -d /dev/dri\nExecStartPre=-/usr/bin/docker rm --force scrypted\nExecStartPre=/bin/sh -ec 'if /usr/bin/ss -H -lun \"sport = :5353\" | /usr/bin/grep -q .; then echo \"UDP 5353 already occupied; refusing Scrypted HomeKit startup\" >&2; exit 1; fi'\nExecStartPre=/usr/bin/docker pull ghcr.io/koush/scrypted\nExecStart=/usr/bin/docker run --name scrypted \\\n  --network host \\\n  --device /dev/dri:/dev/dri \\\n  --mount type=bind,source=/var/lib/scrypted/volume,target=/server/volume \\\n  --mount type=bind,source=/var/lib/scrypted/nvr,target=/nvr \\\n  --mount type=bind,source=/var/lib/scrypted/nvr2,target=/nvr2 \\\n  --env SCRYPTED_NVR_VOLUME=/nvr \\\n  --env SCRYPTED_DOCKER_AVAHI=true \\\n  --env SCRYPTED_WEBHOOK_UPDATE_AUTHORIZATION \\\n  --env SCRYPTED_WEBHOOK_UPDATE=http://127.0.0.1:10444/v1/update \\\n  --label com.centurylinklabs.watchtower.scope=scrypted \\\n  --dns 10.10.10.53 \\\n  --log-driver none \\\n  ghcr.io/koush/scrypted\nExecStop=-/usr/bin/docker stop --time 30 scrypted\nRestart=always\nRestartSec=10\nStandardOutput=journal\nStandardError=journal\n\n[Install]\nWantedBy=multi-user.target\n",
+        "enabled": true,
+        "name": "scrypted.service"
+      },
+      {
+        "contents": "[Unit]\nDescription=Retry Scrypted after recording storage returns\n\n[Timer]\nOnCalendar=minutely\nAccuracySec=1s\nUnit=scrypted.service\n\n[Install]\nWantedBy=timers.target\n",
+        "enabled": true,
+        "name": "scrypted-recovery.timer"
+      }
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run host storage metrics probe periodically
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Persistent=false
+Unit=observability-storage-metrics.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,143 @@
+#!/bin/sh
+# Shared, non-secret operation library. Source this file; do not execute it.
+
+ops_fail() { echo "$1" >&2; return 1; }
+
+ops_map() {
+	cat <<'MAP'
+config/observability/images.env|/etc/observability/images.env|0644
+config/observability/openobserve.env|/etc/observability/openobserve.env|0644
+config/observability/Caddyfile|/etc/observability/Caddyfile|0644
+config/observability/otel-gateway.yaml|/etc/observability/otel-gateway.yaml|0644
+config/observability/otel-gateway-systemd.yaml|/etc/observability/otel-gateway-systemd.yaml|0644
+config/observability/otel-docker-agent.yaml|/etc/observability/otel-docker-agent.yaml|0644
+config/observability/bin/run-otel-collector|/etc/observability/bin/run-otel-collector|0755
+config/observability/bin/emit-host-storage-metrics|/etc/observability/bin/emit-host-storage-metrics|0755
+config/observability/systemd/openobserve.service|/etc/systemd/system/openobserve.service|0644
+config/observability/systemd/observe-proxy.service|/etc/systemd/system/observe-proxy.service|0644
+config/observability/systemd/otel-collector.service|/etc/systemd/system/otel-collector.service|0644
+config/observability/systemd/otel-docker-agent.service|/etc/systemd/system/otel-docker-agent.service|0644
+config/observability/systemd/otelcol-queue-prepare.service|/etc/systemd/system/otelcol-queue-prepare.service|0644
+config/observability/systemd/var-lib-otelcol.mount|/etc/systemd/system/var-lib-otelcol.mount|0644
+config/observability/systemd/observability-storage-metrics.service|/etc/systemd/system/observability-storage-metrics.service|0644
+config/observability/systemd/observability-storage-metrics.timer|/etc/systemd/system/observability-storage-metrics.timer|0644
+MAP
+}
+
+ops_origin() { printf '%s\n' 'https://observe.example.com'; }
+ops_certificate_name() { printf '%s\n' 'observe.example.com'; }
+
+ops_hex64() {
+	[ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1;; esac
+}
+
+ops_target() {
+	case "$1" in ''|@*|*@|*@*@*|*[!A-Za-z0-9._@:-]*) return 1;; esac
+}
+
+ops_hash() {
+	if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+
+ops_validate_map() {
+	duplicates=$(ops_map | cut -d '|' -f 1 | LC_ALL=C sort | uniq -d)
+	[ -z "$duplicates" ] || return 1
+	duplicates=$(ops_map | cut -d '|' -f 2 | LC_ALL=C sort | uniq -d)
+	[ -z "$duplicates" ] || return 1
+	ops_map | while IFS='|' read -r source destination mode; do
+		case "$source:$destination:$mode" in
+			config/observability/*:/etc/observability/*:0644|config/observability/bin/*:/etc/observability/bin/*:0755|config/observability/systemd/*.service:/etc/systemd/system/*.service:0644|config/observability/systemd/*.timer:/etc/systemd/system/*.timer:0644|config/observability/systemd/*.mount:/etc/systemd/system/*.mount:0644) ;;
+			*) exit 1 ;;
+		esac
+		case "$source:$destination" in *'/../'*|../*|*'//'*|*secrets*|*scrypted*|*nvr*) exit 1;; esac
+	done
+}
+
+ops_manifest() {
+	root=$1
+	ops_validate_map || return 1
+	ops_map | while IFS='|' read -r source destination mode; do
+		file=$root/$source
+		[ -f "$file" ] && [ ! -L "$file" ] || exit 1
+		printf '%s|%s|%s|%s\n' "$source" "$destination" "$mode" "$(ops_hash "$file")"
+	done
+}
+
+ops_manifest_digest() { ops_hash "$1"; }
+
+ops_deployed_manifest() {
+	root=$1
+	ops_validate_map || return 1
+	ops_map | while IFS='|' read -r source destination mode; do
+		file=$root$destination
+		[ -f "$file" ] && [ ! -L "$file" ] || exit 1
+		printf '%s|%s|%s|%s\n' "$source" "$destination" "$mode" "$(ops_hash "$file")"
+	done
+}
+
+ops_manifest_shape() {
+	manifest=$1 expected=$2
+	awk -F '|' 'NF != 4 || $1 !~ /^config\/observability\// || $2 !~ /^\/etc\// || $3 !~ /^(0644|0755)$/ || $4 !~ /^[0-9a-f]{64}$/ { exit 1 }' "$manifest" || return 1
+	ops_map | awk -F '|' '{print $1 "|" $2 "|" $3}' > "$expected"
+	awk -F '|' '{print $1 "|" $2 "|" $3}' "$manifest" > "$expected.actual"
+	cmp -s "$expected" "$expected.actual"
+}
+
+ops_remote_path() {
+	case "${OBSERVABILITY_REMOTE_ROOT:-}" in '') printf '%s\n' "$1";; *) printf '%s%s\n' "$OBSERVABILITY_REMOTE_ROOT" "$1";; esac
+}
+
+ops_atomic() (
+	path=$1 value=$2
+	dir=$(dirname "$path")
+	install -d -m 0700 "$dir"
+	tmp=$(mktemp "$dir/.transaction.XXXXXX") || return 1
+	trap 'rm -f "$tmp"' EXIT HUP INT TERM
+	printf '%s\n' "$value" > "$tmp"
+	chmod 0600 "$tmp"
+	mv -f "$tmp" "$path"
+
+)
+
+ops_pointer() {
+	pointer=$1
+	[ -f "$pointer" ] && [ ! -L "$pointer" ] || return 1
+	[ "$(wc -l < "$pointer" | tr -d ' ')" = 1 ] || return 1
+	IFS='|' read -r source baseline stage extra < "$pointer" || return 1
+	[ -z "${extra:-}" ] && ops_hex64 "$source" && ops_hex64 "$baseline" || return 1
+	[ "$stage" = "stages/$source" ] || return 1
+	OPS_POINTER_SOURCE=$source
+	OPS_POINTER_BASELINE=$baseline
+	OPS_POINTER_STAGE=$stage
+}
+
+ops_receipt() {
+	receipt=$1
+	[ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+	[ "$(wc -l < "$receipt" | tr -d ' ')" = 9 ] || return 1
+	{
+		IFS= read -r format
+		IFS= read -r receipt_target
+		IFS= read -r receipt_source
+		IFS= read -r receipt_baseline
+		IFS= read -r receipt_preflight
+		IFS= read -r receipt_recording_nvr
+		IFS= read -r receipt_recording_nvr2
+		IFS= read -r receipt_origin
+		IFS= read -r receipt_certificate
+	} < "$receipt" || return 1
+	[ "$format" = 'format=observability-preflight-v3' ] || return 1
+	OPS_RECEIPT_TARGET=${receipt_target#target=}
+	OPS_RECEIPT_SOURCE=${receipt_source#source_digest=}
+	OPS_RECEIPT_BASELINE=${receipt_baseline#baseline=}
+	OPS_RECEIPT_PREFLIGHT=${receipt_preflight#preflight_digest=}
+	OPS_RECEIPT_RECORDING_NVR=${receipt_recording_nvr#recording_nvr=}
+	OPS_RECEIPT_RECORDING_NVR2=${receipt_recording_nvr2#recording_nvr2=}
+	OPS_RECEIPT_ORIGIN=${receipt_origin#origin=}
+	OPS_RECEIPT_CERTIFICATE=${receipt_certificate#certificate_name=}
+	[ "target=$OPS_RECEIPT_TARGET" = "$receipt_target" ] && [ "source_digest=$OPS_RECEIPT_SOURCE" = "$receipt_source" ] && [ "baseline=$OPS_RECEIPT_BASELINE" = "$receipt_baseline" ] && [ "preflight_digest=$OPS_RECEIPT_PREFLIGHT" = "$receipt_preflight" ] && [ "recording_nvr=$OPS_RECEIPT_RECORDING_NVR" = "$receipt_recording_nvr" ] && [ "recording_nvr2=$OPS_RECEIPT_RECORDING_NVR2" = "$receipt_recording_nvr2" ] && [ "origin=$OPS_RECEIPT_ORIGIN" = "$receipt_origin" ] && [ "certificate_name=$OPS_RECEIPT_CERTIFICATE" = "$receipt_certificate" ] || return 1
+	ops_target "$OPS_RECEIPT_TARGET" && ops_hex64 "$OPS_RECEIPT_SOURCE" && ops_hex64 "$OPS_RECEIPT_BASELINE" && ops_hex64 "$OPS_RECEIPT_PREFLIGHT" || return 1
+	case "$OPS_RECEIPT_RECORDING_NVR" in ''|*[!0-9]*) return 1;; esac
+	case "$OPS_RECEIPT_RECORDING_NVR2" in ''|*[!0-9]*) return 1;; esac
+	[ "$OPS_RECEIPT_ORIGIN" = "$(ops_origin)" ] && [ "$OPS_RECEIPT_CERTIFICATE" = "$(ops_certificate_name)" ]
+}

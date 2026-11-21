@@ -1,0 +1,25 @@
+#!/bin/sh
+# Rolls back only a receipt-bound observability transaction.
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$script_dir/observability-operation-lib"
+
+usage() { echo "usage: $0 <ssh-target> <preflight-receipt>" >&2; exit 2; }
+fail() { echo "$1" >&2; exit 1; }
+
+[ "$#" -eq 2 ] || usage
+requested_target=$1
+target=$requested_target
+ops_target "$target" || fail 'invalid SSH target'
+ops_receipt "$2" || fail 'invalid preflight receipt'
+[ "$OPS_RECEIPT_TARGET" = "$requested_target" ] || fail 'receipt target mismatch'
+target=$requested_target
+
+if [ -n "${OBSERVABILITY_REMOTE_ROOT:-}" ]; then
+	OBSERVABILITY_REMOTE_LIB="$script_dir/observability-operation-lib" OBSERVABILITY_REMOTE_ROOT="$OBSERVABILITY_REMOTE_ROOT" "$script_dir/observability-remote" rollback "$OPS_RECEIPT_SOURCE" "$OPS_RECEIPT_BASELINE" "$OPS_RECEIPT_PREFLIGHT"
+else
+	{ cat "$script_dir/observability-operation-lib"; cat "$script_dir/observability-remote"; } | ssh -o BatchMode=yes "$target" "sudo install -d -m 0700 /run/observability-operation && sudo install -m 0700 /dev/stdin /run/observability-operation/runner"
+	ssh -o BatchMode=yes "$target" "sudo /run/observability-operation/runner rollback $OPS_RECEIPT_SOURCE $OPS_RECEIPT_BASELINE $OPS_RECEIPT_PREFLIGHT"
+fi
+echo 'rollback: observability transaction restored'

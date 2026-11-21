@@ -1,0 +1,41 @@
+[Unit]
+Description=Isolated Docker metrics agent
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+ConditionPathExists=/etc/observability/images.env
+ConditionPathExists=/etc/observability/otel-docker-agent.yaml
+ConditionPathExists=/etc/observability/secrets/otel-collector.env
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/observability/images.env
+TimeoutStartSec=0
+TimeoutStopSec=45
+UMask=0077
+ExecStartPre=-/usr/bin/docker rm --force otel-docker-agent
+ExecStart=/usr/bin/docker run --name otel-docker-agent \
+  --pull=never \
+  --network host \
+  --user 10001:10001 \
+  --group-add=233 \
+  --read-only \
+  --cap-drop=ALL \
+  --security-opt no-new-privileges \
+  --memory=384m \
+  --cpus=0.5 \
+  --pids-limit=256 \
+  --env GOMEMLIMIT=256MiB \
+  --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock,readonly \
+  --mount type=bind,source=/etc/observability/otel-docker-agent.yaml,target=/etc/otelcol/config.yaml,readonly \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=32m,uid=10001,gid=10001,mode=0700 \
+  --log-driver journald \
+  ${OTELCOL_IMAGE} --config=/etc/otelcol/config.yaml
+ExecStop=-/usr/bin/docker stop --time 30 otel-docker-agent
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

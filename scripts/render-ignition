@@ -1,0 +1,82 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 2 ]; then
+  echo "usage: $0 <ssh-public-key-file> <output.ign>" >&2
+  exit 2
+fi
+
+repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+public_key=$(sed -n '1p' "$1")
+output=$2
+
+case "$public_key" in
+  ssh-*) ;;
+  *)
+    echo "public key file does not begin with ssh-" >&2
+    exit 1
+    ;;
+esac
+
+mkdir -p "$(dirname -- "$output")"
+output_dir=$(dirname -- "$output")
+output_name=$(basename -- "$output")
+umask 077
+tmp_output=$(mktemp "$output_dir/.$output_name.tmp.XXXXXX")
+cleanup() {
+  rm -f "$tmp_output"
+}
+trap cleanup EXIT HUP INT TERM
+jq --arg public_key "$public_key" \
+  --rawfile observability_images "$repo_dir/config/observability/images.env" \
+  --rawfile observability_openobserve "$repo_dir/config/observability/openobserve.env" \
+  --rawfile observability_caddy "$repo_dir/config/observability/Caddyfile" \
+  --rawfile observability_gateway "$repo_dir/config/observability/otel-gateway.yaml" \
+  --rawfile observability_gateway_systemd "$repo_dir/config/observability/otel-gateway-systemd.yaml" \
+  --rawfile observability_docker_agent "$repo_dir/config/observability/otel-docker-agent.yaml" \
+  --rawfile observability_run_collector "$repo_dir/config/observability/bin/run-otel-collector" \
+  --rawfile observability_storage_probe "$repo_dir/config/observability/bin/emit-host-storage-metrics" \
+  --rawfile observability_openobserve_unit "$repo_dir/config/observability/systemd/openobserve.service" \
+  --rawfile observability_proxy_unit "$repo_dir/config/observability/systemd/observe-proxy.service" \
+  --rawfile observability_collector_unit "$repo_dir/config/observability/systemd/otel-collector.service" \
+  --rawfile observability_docker_agent_unit "$repo_dir/config/observability/systemd/otel-docker-agent.service" \
+  --rawfile observability_queue_prepare_unit "$repo_dir/config/observability/systemd/otelcol-queue-prepare.service" \
+  --rawfile observability_queue_mount_unit "$repo_dir/config/observability/systemd/var-lib-otelcol.mount" \
+  --rawfile observability_storage_unit "$repo_dir/config/observability/systemd/observability-storage-metrics.service" \
+  --rawfile observability_storage_timer_unit "$repo_dir/config/observability/systemd/observability-storage-metrics.timer" \
+  'def source($contents): "data:text/plain;charset=utf-8;base64," + ($contents | @base64);
+   def file($path; $mode; $contents): {overwrite: true, path: $path, contents: {compression: "", source: source($contents)}, mode: $mode};
+   .passwd.users[] |= if .name == "core" then .sshAuthorizedKeys = [$public_key] else . end
+   | .storage.files += [
+       file("/etc/observability/images.env"; 420; $observability_images),
+       file("/etc/observability/openobserve.env"; 420; $observability_openobserve),
+       file("/etc/observability/Caddyfile"; 420; $observability_caddy),
+       file("/etc/observability/otel-gateway.yaml"; 420; $observability_gateway),
+       file("/etc/observability/otel-gateway-systemd.yaml"; 420; $observability_gateway_systemd),
+       file("/etc/observability/otel-docker-agent.yaml"; 420; $observability_docker_agent),
+       file("/etc/observability/bin/run-otel-collector"; 493; $observability_run_collector),
+       file("/etc/observability/bin/emit-host-storage-metrics"; 493; $observability_storage_probe)
+     ]
+   | .storage.files += [
+       file("/etc/observability/systemd/openobserve.service"; 420; $observability_openobserve_unit),
+       file("/etc/observability/systemd/observe-proxy.service"; 420; $observability_proxy_unit),
+       file("/etc/observability/systemd/otel-collector.service"; 420; $observability_collector_unit),
+       file("/etc/observability/systemd/otel-docker-agent.service"; 420; $observability_docker_agent_unit),
+       file("/etc/observability/systemd/otelcol-queue-prepare.service"; 420; $observability_queue_prepare_unit),
+       file("/etc/observability/systemd/var-lib-otelcol.mount"; 420; $observability_queue_mount_unit),
+       file("/etc/observability/systemd/observability-storage-metrics.service"; 420; $observability_storage_unit),
+       file("/etc/observability/systemd/observability-storage-metrics.timer"; 420; $observability_storage_timer_unit)
+     ]
+   | .systemd.units += [
+       {contents: $observability_openobserve_unit, enabled: true, name: "openobserve.service"},
+       {contents: $observability_proxy_unit, enabled: true, name: "observe-proxy.service"},
+       {contents: $observability_collector_unit, enabled: true, name: "otel-collector.service"},
+       {contents: $observability_docker_agent_unit, enabled: true, name: "otel-docker-agent.service"},
+       {contents: $observability_queue_prepare_unit, name: "otelcol-queue-prepare.service"},
+       {contents: $observability_queue_mount_unit, enabled: true, name: "var-lib-otelcol.mount"},
+       {contents: $observability_storage_unit, name: "observability-storage-metrics.service"},
+       {contents: $observability_storage_timer_unit, enabled: true, name: "observability-storage-metrics.timer"}
+     ]' \
+  "$repo_dir/config/scrypted-nvr.ign.template.json" > "$tmp_output"
+jq -e . "$tmp_output" >/dev/null
+mv -f "$tmp_output" "$output"

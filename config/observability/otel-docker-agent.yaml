@@ -1,0 +1,47 @@
+receivers:
+  docker_stats:
+    endpoint: unix:///var/run/docker.sock
+    collection_interval: 30s
+    timeout: 5s
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 48
+  filter/drop_unapproved_docker_metrics:
+    error_mode: propagate
+    metric_conditions:
+      - metric.name != "container.cpu.usage.total" and metric.name != "container.cpu.utilization" and metric.name != "container.memory.usage.total" and metric.name != "container.memory.usage.limit" and metric.name != "container.network.io.usage.rx_bytes" and metric.name != "container.network.io.usage.tx_bytes" and metric.name != "container.blockio.io_service_bytes_recursive"
+      - resource.attributes["container.name"] != "scrypted" and resource.attributes["container.name"] != "scrypted-watchtower" and resource.attributes["container.name"] != "openobserve" and resource.attributes["container.name"] != "observe-proxy" and resource.attributes["container.name"] != "otel-collector" and resource.attributes["container.name"] != "otel-docker-agent"
+      - metric.name == "container.blockio.io_service_bytes_recursive" and datapoint.attributes["operation"] != "read" and datapoint.attributes["operation"] != "write"
+      - resource.attributes["telemetry.synthetic"] != nil and IsBool(resource.attributes["telemetry.synthetic"]) == false
+  transform/normalize_docker_metrics:
+    error_mode: propagate
+    metric_statements:
+      - context: resource
+        statements:
+          - set(resource.attributes["host.name"], "scrypted-nvr")
+          - set(resource.attributes["telemetry.synthetic"], false) where resource.attributes["telemetry.synthetic"] == nil
+          - keep_keys(resource.attributes, ["host.name", "container.name", "telemetry.synthetic"])
+      - context: datapoint
+        statements:
+          - keep_keys(datapoint.attributes, ["operation"])
+  batch/metrics:
+    send_batch_size: 512
+    send_batch_max_size: 512
+    timeout: 5s
+
+exporters:
+  otlp_http/docker_agent:
+    metrics_endpoint: http://127.0.0.1:4320/v1/metrics
+
+service:
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    metrics/docker:
+      receivers: [docker_stats]
+      processors: [memory_limiter, filter/drop_unapproved_docker_metrics, transform/normalize_docker_metrics, batch/metrics]
+      exporters: [otlp_http/docker_agent]

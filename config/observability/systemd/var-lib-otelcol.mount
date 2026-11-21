@@ -1,0 +1,14 @@
+[Unit]
+Description=OpenTelemetry Collector queue filesystem
+Requires=otelcol-queue-prepare.service
+After=otelcol-queue-prepare.service
+Before=otel-collector.service
+
+[Mount]
+What=/var/lib/otelcol-queue.img
+Where=/var/lib/otelcol
+Type=ext4
+Options=loop,nodev,nosuid,noexec,noatime
+
+[Install]
+RequiredBy=otel-collector.service

@@ -1,0 +1,48 @@
+[Unit]
+Description=LAN-only Caddy observability proxy
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+ConditionPathExists=/etc/observability/images.env
+ConditionPathExists=/etc/observability/Caddyfile
+ConditionPathExists=/etc/observability/secrets/observe-proxy.env
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/observability/images.env
+TimeoutStartSec=0
+TimeoutStopSec=45
+UMask=0077
+ExecStartPre=/usr/bin/install -d -m 0750 -o 0 -g 0 /var/lib/observability/caddy
+ExecStartPre=/usr/bin/install -d -m 0750 -o 20002 -g 20002 /var/lib/observability/caddy/data
+ExecStartPre=/usr/bin/install -d -m 0750 -o 20002 -g 20002 /var/lib/observability/caddy/config
+ExecStartPre=/bin/sh -ec 'test "$(/usr/bin/stat -c "%%u:%%g:%%a" /var/lib/observability/caddy)" = "0:0:750"'
+ExecStartPre=/bin/sh -ec 'test "$(/usr/bin/stat -c "%%u:%%g:%%a" /var/lib/observability/caddy/data)" = "20002:20002:750"'
+ExecStartPre=/bin/sh -ec 'test "$(/usr/bin/stat -c "%%u:%%g:%%a" /var/lib/observability/caddy/config)" = "20002:20002:750"'
+ExecStartPre=/bin/sh -ec 'test "$(/usr/bin/stat -c "%%u:%%g:%%a" /etc/observability/secrets/observe-proxy.env)" = "0:0:600"'
+ExecStartPre=-/usr/bin/docker rm --force observe-proxy
+ExecStart=/usr/bin/docker run --name observe-proxy \
+  --pull=never \
+  --network host \
+  --user 20002:20002 \
+  --read-only \
+  --cap-drop=ALL \
+  --cap-add=NET_BIND_SERVICE \
+  --security-opt no-new-privileges \
+  --memory=256m \
+  --cpus=0.5 \
+  --env-file /etc/observability/secrets/observe-proxy.env \
+  --mount type=bind,source=/var/lib/observability/caddy/data,target=/data \
+  --mount type=bind,source=/var/lib/observability/caddy/config,target=/config \
+  --mount type=bind,source=/etc/observability/Caddyfile,target=/etc/caddy/Caddyfile,readonly \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=20002,gid=20002,mode=0700 \
+  --log-driver journald \
+  ${CADDY_IMAGE}
+ExecStop=-/usr/bin/docker stop --time 30 observe-proxy
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

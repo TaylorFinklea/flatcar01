@@ -1,0 +1,11 @@
+[Unit]
+Description=Create the OpenTelemetry Collector queue filesystem image
+ConditionPathExists=!/var/lib/otelcol-queue.img
+Before=var-lib-otelcol.mount
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/install -d -m 0750 -o 0 -g 0 /var/lib/otelcol
+ExecStart=/bin/sh -ec 'test "$(/usr/bin/stat -c "%%u:%%g:%%a" /var/lib/otelcol)" = "0:0:750"'
+ExecStart=/usr/bin/truncate --size=268435456 /var/lib/otelcol-queue.img
+ExecStart=/usr/sbin/mkfs.ext4 -F /var/lib/otelcol-queue.img

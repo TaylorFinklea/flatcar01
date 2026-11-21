@@ -1,0 +1,33 @@
+[Unit]
+Description=Short-lived host storage metrics probe
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/etc/observability/bin/emit-host-storage-metrics
+TimeoutStartSec=10s
+CapabilityBoundingSet=
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateMounts=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET
+IPAddressAllow=127.0.0.1
+IPAddressDeny=any
+MemoryMax=64M
+CPUQuota=10%
+InaccessiblePaths=/etc/observability/secrets /var/lib/openobserve /var/lib/scrypted/volume
+ReadOnlyPaths=/var/lib/scrypted/nvr /var/lib/scrypted/nvr2 /sys/class/block
+UMask=0077
+StandardOutput=null
+StandardError=null

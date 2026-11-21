@@ -1,0 +1,38 @@
+{
+  "canaries": [
+    "CANARY_AL_PROMPT",
+    "CANARY_AL_RESPONSE",
+    "CANARY_AL_COMMAND",
+    "CANARY_AL_PATH",
+    "CANARY_AL_URL",
+    "CANARY_AL_HEADER",
+    "CANARY_AL_BODY",
+    "CANARY_AL_SECRET"
+  ],
+  "input": {
+    "resource": {
+      "attributes": {
+        "host.name": "untrusted-host",
+        "prompt": "CANARY_AL_PROMPT",
+        "response": "CANARY_AL_RESPONSE",
+        "shell.command": "CANARY_AL_COMMAND",
+        "file.path": "CANARY_AL_PATH",
+        "url.full": "CANARY_AL_URL",
+        "http.request.header.authorization": "CANARY_AL_HEADER",
+        "env.secret": "CANARY_AL_SECRET"
+      }
+    },
+    "logs": [
+      {
+        "body": "CANARY_AL_BODY",
+        "attributes": {"user.text": "CANARY_AL_PROMPT", "tool.result": "CANARY_AL_RESPONSE"}
+      }
+    ]
+  },
+  "expected": {
+    "records": [],
+    "dropped_records": [
+      "AI logs are always rejected"
+    ]
+  }
+}

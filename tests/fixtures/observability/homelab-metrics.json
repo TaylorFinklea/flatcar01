@@ -1,0 +1,63 @@
+{
+  "canaries": [
+    "CANARY_HM_PROMPT",
+    "CANARY_HM_RESPONSE",
+    "CANARY_HM_COMMAND",
+    "CANARY_HM_PATH",
+    "CANARY_HM_URL",
+    "CANARY_HM_HEADER",
+    "CANARY_HM_BODY",
+    "CANARY_HM_SECRET"
+  ],
+  "input": {
+    "resource": {
+      "attributes": {
+        "host.name": "untrusted-host",
+        "service.name": "CANARY_HM_PROMPT",
+        "process.command_line": "CANARY_HM_COMMAND",
+        "file.path": "CANARY_HM_PATH",
+        "url.full": "CANARY_HM_URL",
+        "http.request.header.authorization": "CANARY_HM_HEADER",
+        "http.request.body": "CANARY_HM_BODY",
+        "env.secret": "CANARY_HM_SECRET",
+        "telemetry.synthetic": true
+      }
+    },
+    "metrics": [
+      {
+        "name": "system.cpu.utilization",
+        "attributes": {
+          "state": "user",
+          "device": "enp0s31f6",
+          "cwd": "CANARY_HM_PATH"
+        },
+        "value": 0.42
+      },
+      {
+        "name": "private.homelab.unknown",
+        "attributes": {
+          "user.text": "CANARY_HM_RESPONSE"
+        },
+        "value": 1
+      }
+    ]
+  },
+  "expected": {
+    "records": [
+      {
+        "name": "system.cpu.utilization",
+        "resource": {
+          "host.name": "scrypted-nvr",
+          "telemetry.synthetic": true
+        },
+        "attributes": {
+          "state": "user"
+        },
+        "value": 0.42
+      }
+    ],
+    "dropped_records": [
+      "private.homelab.unknown"
+    ]
+  }
+}

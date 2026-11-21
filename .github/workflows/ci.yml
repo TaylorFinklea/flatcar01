@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # The operator tooling and its tests target the macOS host that deploys
+    # (BSD stat/tar/date), so CI runs there too.
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install GNU tar (traversal fixture in the hermetic suite)
+        run: |
+          brew list gnu-tar >/dev/null 2>&1 || brew install gnu-tar
+          test -x /opt/homebrew/bin/gtar
+      - name: Offline shell suites
+        run: |
+          set -eu
+          for t in tests/*.sh; do
+            case "$t" in
+              # Needs a Docker daemon and pinned images (disposable runtime gate).
+              tests/observability-config-runtime.sh) continue ;;
+              # Runs against a live, deployed endpoint.
+              tests/observability-privacy-live.sh) continue ;;
+              # Already run by tests/observability-operations.sh.
+              tests/observability-operations-hermetic.sh) continue ;;
+            esac
+            echo "::group::$t"
+            sh "$t"
+            echo "::endgroup::"
+          done

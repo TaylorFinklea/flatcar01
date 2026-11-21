@@ -1,0 +1,19 @@
+build/
+.worktrees/
+.DS_Store
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+
+# Local planning and issue tracking (kept out of the public tree)
+.docs/ai/
+.beads/
+
+# Python bytecode
+__pycache__/
+
+# Local debugging stubs
+.debug-fake-ssh

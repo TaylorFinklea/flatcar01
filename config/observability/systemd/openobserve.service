@@ -1,0 +1,42 @@
+[Unit]
+Description=OpenObserve local observability store
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+ConditionPathExists=/etc/observability/images.env
+ConditionPathExists=/etc/observability/openobserve.env
+ConditionPathExists=/etc/observability/secrets/openobserve.env
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/observability/images.env
+TimeoutStartSec=0
+TimeoutStopSec=45
+ExecStartPre=/usr/bin/install -d -m 0750 -o 20001 -g 20001 /var/lib/openobserve
+ExecStartPre=/bin/sh -ec 'test "$(/usr/bin/stat -c "%%u:%%g:%%a" /var/lib/openobserve)" = "20001:20001:750"'
+ExecStartPre=/bin/sh -ec 'test "$(/usr/bin/stat -c "%%u:%%g:%%a" /etc/observability/secrets/openobserve.env)" = "0:0:600"'
+ExecStartPre=-/usr/bin/docker rm --force openobserve
+ExecStart=/usr/bin/docker run --name openobserve \
+  --pull=never \
+  --network host \
+  --user 20001:20001 \
+  --read-only \
+  --cap-drop=ALL \
+  --security-opt no-new-privileges \
+  --memory=3g \
+  --cpus=2.0 \
+  --pids-limit=512 \
+  --env-file /etc/observability/openobserve.env \
+  --env-file /etc/observability/secrets/openobserve.env \
+  --mount type=bind,source=/var/lib/openobserve,target=/data \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,uid=20001,gid=20001,mode=0700 \
+  --log-driver journald \
+  ${OPENOBSERVE_IMAGE}
+ExecStop=-/usr/bin/docker stop --time 30 openobserve
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
